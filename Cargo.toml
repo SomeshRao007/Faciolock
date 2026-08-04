@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/faciolock-vision"]
+
+# The Phase 0 spikes are throwaway (wiki/09) and keeping them out of the workspace
+# keeps their dependency trees out of the real crates'. Phase 3 asserts in CI that
+# `cargo tree -p faciolock-pam` contains only libc and faciolock-ipc; that assertion
+# is worth nothing if a spike can drag something into the lockfile.
+exclude = ["spikes"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+tract-onnx = "0.23.4"
+
+[profile.release]
+debug = true

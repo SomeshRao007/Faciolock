@@ -1,0 +1,17 @@
+# SYNTHETIC -- no biometric data. Committed and run in CI.
+# Source is a 16x24 checkerboard, generated identically in Rust,
+# so no image needs shipping. Transform and chip from OpenCV 5.0.0.
+opencv 5.0.0
+pattern 160 160
+landmark 52.0 61.0
+landmark 104.0 67.0
+landmark 76.0 89.0
+landmark 56.0 116.0
+landmark 101.0 121.0
+reference 38.2946 51.6963
+reference 73.5318 51.5014
+reference 56.0252 71.7366
+reference 41.5493 92.3655
+reference 70.7299 92.2041
+transform 0.7052276782952379 0.03330922322104863 -1.865031125927421 -0.03330922322104863 0.7052276782952379 10.457565283287506
+chip_size 112
