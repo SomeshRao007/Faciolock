@@ -1,0 +1,13 @@
+[package]
+name = "probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# No dependencies, deliberately. This reads a file of bytes and does f32 reductions
+# over it; the standard library covers all of that. If a dependency ever appears here
+# it means the tool grew past what a Phase 0 spike should be.
+[dependencies]
+
+[profile.release]
+debug = true

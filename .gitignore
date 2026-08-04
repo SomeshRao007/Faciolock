@@ -1,0 +1,51 @@
+# Rust build output. spikes/runtime/target alone is ~2 GB (ort vendors onnxruntime).
+target/
+
+# ---------------------------------------------------------------------------
+# Corpus: raw IR captures
+# ---------------------------------------------------------------------------
+# ~20 MB per 3-second take and they contain the operator's face. The .json
+# sidecars are kept deliberately -- they are tiny, carry no biometric data, and
+# are the only record of what was in front of the camera for each capture.
+#
+# CI needs *some* corpus to replay the liveness assertions against. That is an
+# open question (committed subset from a consenting contributor, or a release-asset
+# tarball fetched by the harness) -- see corpus/README.md.
+corpus/*.gray
+!corpus/*.json
+!corpus/README.md
+
+# ---------------------------------------------------------------------------
+# Models: fetched from upstream, not authored here
+# ---------------------------------------------------------------------------
+# Ship as a separate faciolock-models package with vendored licences and a
+# SHA256SUMS verified at daemon startup (wiki/04). Provenance and licence status
+# for each file is tracked in models/README.md, which IS committed.
+models/*.onnx
+!models/README.md
+
+# ---------------------------------------------------------------------------
+# Editors, OS
+# ---------------------------------------------------------------------------
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# ---------------------------------------------------------------------------
+# NEVER commit
+# ---------------------------------------------------------------------------
+# Enrolled templates are biometric data. Even TPM-sealed they do not belong in a
+# repository, and an unsealed one is a face embedding in plaintext.
+*.tpl
+/var/
+
+# ---------------------------------------------------------------------------
+# Golden references derived from real faces
+# ---------------------------------------------------------------------------
+# detect_golden.txt holds box and landmark coordinates measured from the corpus
+# recordings, so it is face-derived and stays local. Regenerate it with
+# tools/gen-goldens.py. The alignment golden beside it IS committed -- it is a
+# synthetic checkerboard and contains no biometric data at all.
+crates/faciolock-vision/testdata/detect_golden.txt

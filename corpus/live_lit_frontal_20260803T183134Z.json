@@ -1,0 +1,14 @@
+{
+  "label": "live_lit_frontal",
+  "recorded_utc": "20260803T183134Z",
+  "device_bypath": "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:7:1.2-video-index0",
+  "device_resolved": "/dev/video2",
+  "width": 640,
+  "height": 360,
+  "fps": 30,
+  "pixel_format": "GREY",
+  "frames_requested": 90,
+  "frames_actual": 90,
+  "bytes": 20736000,
+  "note": "lit room, facing camera"
+}

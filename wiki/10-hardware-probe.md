@@ -1,0 +1,436 @@
+# 10 — Hardware Probe Log
+
+Lab notebook. Exact commands and raw output from probing the reference machine.
+Kept verbatim so results are reproducible and so other people can run the same
+sequence against their own hardware for the compatibility list.
+
+**All commands here are read-only.** Nothing writes to the camera. This is the
+complete, safe probe sequence — do not run `linux-enable-ir-emitter configure` or any
+UVC brute-force as part of it ([why](02-howdy-teardown.md#w4b--howdy-does-not-control-the-ir-emitter-at-all)).
+
+---
+
+## Reference machine
+
+ASUS Vivobook · Kubuntu 26 · ffmpeg 8.0.1-3ubuntu2 · v4l-utils · 2026-08-03
+
+---
+
+## Probe 1 — enumerate video devices and formats
+
+```bash
+for d in /dev/video*; do echo "=== $d"; v4l2-ctl -d "$d" --info --list-formats 2>/dev/null | grep -E "Card type|\[[0-9]\]"; done
+```
+
+```
+=== /dev/video0
+	Card type        : ASUS FHD webcam: ASUS FHD webca
+	[0]: 'MJPG' (Motion-JPEG, compressed)
+	[1]: 'YUYV' (YUYV 4:2:2)
+=== /dev/video1
+	Card type        : ASUS FHD webcam: ASUS FHD webca
+=== /dev/video2
+	Card type        : ASUS FHD webcam: ASUS IR camera
+	[0]: 'GREY' (8-bit Greyscale)
+=== /dev/video3
+	Card type        : ASUS FHD webcam: ASUS IR camera
+```
+
+**Result: `/dev/video2` is the IR camera** — `GREY` and nothing else, and the card type
+says so outright. Both heuristics from
+[05](05-vision-pipeline.md#finding-the-ir-camera) fire on the same device.
+
+Note `/dev/video1` and `/dev/video3` list **no formats at all**. They are not cameras;
+see Probe 4.
+
+### First run of this probe was inconclusive — kept as a lesson
+
+The original attempt printed only the four `echo` lines and no format details.
+`v4l2-ctl` was not installed, and `2>/dev/null` swallowed the "command not found".
+
+**`2>/dev/null` hides a missing binary exactly as well as it hides a permission
+error.** A probe that silently degrades to "no evidence" is worse than one that fails
+loudly, because "no evidence" reads like "nothing there". The daemon's own device
+enumeration must distinguish *absent*, *inaccessible*, and *present-but-not-IR* rather
+than collapsing all three into one empty result.
+
+```bash
+sudo apt install v4l-utils
+```
+
+---
+
+## Probe 2 — identify the IR device and its format
+
+```bash
+ffplay -f v4l2 -i /dev/video2
+```
+
+Relevant line from the output:
+
+```
+Input #0, video4linux2,v4l2, from '/dev/video2':
+  Stream #0:0: Video: rawvideo (Y800 / 0x30303859), gray, 640x360, 55296 kb/s, 30 fps, 30 tbr
+```
+
+**Result: `/dev/video2` is the IR camera.**
+
+| Property | Value | Why it matters |
+|---|---|---|
+| Pixel format | `Y800` / `gray` | 8-bit greyscale — RGB webcams rarely offer this. Primary IR heuristic ([05](05-vision-pipeline.md#finding-the-ir-camera)). |
+| Resolution | 640×360 | Low and wide — consistent with an IR sensor, not a 1080p RGB webcam. |
+| Frame rate | 30 fps | Gives 15 ON/OFF pairs per second. |
+| Codec | `rawvideo` | **No MJPEG decode needed** — removes a JPEG parser from the daemon's attack surface. |
+
+### Visual emitter check
+
+While the stream above was running, a phone's front camera pointed at the bezel
+showed a **faint purple glow, visibly blinking**. 850 nm NIR registers as purple on
+most phone sensors; the IR-cut filter on rear cameras usually blocks it, front
+cameras usually don't.
+
+This confirmed the emitter fires on device open with no configuration — but *not*
+what the blinking meant. Two candidates:
+
+- **H1** — genuine per-frame strobing (would give us free active liveness)
+- **H2** — PWM dimming aliasing against the phone's rolling shutter (constant
+  illumination in practice, no free strobe)
+
+The eye cannot distinguish these. The IR sensor can. Hence Probe 3.
+
+---
+
+## Probe 3 — per-frame mean luma (the decisive test)
+
+```bash
+ffmpeg -f v4l2 -i /dev/video2 -frames:v 60 -vf "signalstats,metadata=print:key=lavfi.signalstats.YAVG" -f null - 2>&1 | grep YAVG
+```
+
+Raw output, 60 frames, `lavfi.signalstats.YAVG` prefix stripped:
+
+```
+22.6954       23.412        14.3455       31.4154      ← AGC converging
+ 0.00126302   59.9136        0.00366753   61.9249
+ 0.00404514   61.0619        0.00392795   60.3695
+ 0.0040842    59.8574        0.00400608   59.3313
+ 0.0040625    58.8541        0.00408854   58.4122
+ 0.00403212   58.0754        0.00400174   57.7173
+ 0.00414931   57.4615        0.00385851   56.9237
+ 0.00415799   56.8727        0.00402778   56.46
+ 0.00415799   56.3348        0.00403212   55.9671
+ 0.00396701   55.8291        0.00417535   55.4042
+ 0.00419705   55.3045        0.0044184    55.063
+ 0.00423611   54.7756        0.00448785   54.6959
+ 0.00424045   54.6283        0.00430556   54.5722
+ 0.00414497   54.0984        0.00412326   54.2633
+ 0.00456163   53.7433        0.00436198   53.7693
+```
+
+**Result: H1 confirmed. The hardware strobes the emitter per frame.**
+
+### Reading the data
+
+1. **Frames 1–4 are AGC convergence** (22.7, 23.4, 14.3, 31.4). Discard the first
+   ~5 frames of any capture. Pre-warming avoids paying this at authentication time.
+
+2. **From frame 5, perfect alternation.** 27 clean ON/OFF pairs, no missed beats, no
+   drift in phase. `~0.004` alternating with `~54–62`. A ratio of roughly **14,000:1**
+   — this is not a marginal signal.
+
+3. **OFF frames read `0.004`, not `0.000`.** Nonzero means genuine sensor read noise,
+   i.e. a real exposure with the emitter dark — not a dropped, skipped, or synthetic
+   frame. **We get a true dark reference for free.** This is what enables the
+   external-IR-floodlight check ([05](05-vision-pipeline.md#the-strobe-difference-test)),
+   which was not possible in the original hand-rolled-strobe design.
+
+4. **ON frames decay 61.9 → 53.7 over ~2 s** (−13%). AGC settling and/or LED thermal
+   droop. **Therefore: never threshold on absolute brightness.** Only the ON/OFF
+   ratio and the spatial falloff pattern are stable across a capture. This is the
+   single most important calibration constraint the probe produced.
+
+### What this deleted from the project
+
+| Deleted | Because |
+|---|---|
+| Native `UVCIOC_CTRL_QUERY` emitter control | hardware already strobes |
+| Per-laptop emitter configuration database | nothing to configure |
+| Motion-reactive hardware denylist | we never write a UVC control |
+| USB-bus-hang risk | ditto |
+| Runtime dep on `linux-enable-ir-emitter` | downgraded to `Suggests:` |
+
+Capability detection becomes a **read-only observation** — capture 30 frames, test
+for alternation — rather than a write-probe. Strictly safer and strictly simpler.
+Full write-up: [Q3 in 08](08-open-questions.md#q3--ir-emitter--resolved-no-emitter-code-at-all).
+
+---
+
+## Probe 3b — repeat run, 24 hours later
+
+Same command, same machine, different ambient lighting. Confirms the strobe is stable
+and — more usefully — shows how far the *absolute* values move between sessions.
+
+```
+31.9318  32.9474  14.1797  44.2447        ← AGC converging, discard
+ 0.000164931  61.5877   0.000399306  63.7701
+ 0.000516493  62.9413   0.000503472  62.2813
+ …                                        ← 28 clean alternating pairs
+ 0.000655382  56.5051   0.000863715  63.7969
+ 0.0010026    63.6564   0.00108073   63.4741
+```
+
+| | First run | This run | Change |
+|---|---|---|---|
+| OFF floor | ~0.0040 | ~0.0005 | **10× lower** |
+| ON range | 61.9 → 53.7 | 63.8 → 56.5, then back to 63.8 | AGC re-opened mid-capture |
+| ON/OFF ratio | ~14,000:1 | ~100,000:1 | both enormous |
+| Alternation | 27 clean pairs | 28 clean pairs | stable |
+
+**What this changes.** The alternation itself is rock solid — that claim survives.
+But the OFF floor is not a constant, it is an ambient-noise reading that moved by an
+order of magnitude between two runs on *the same machine*, and the ON series does not
+even decay monotonically — AGC re-opened partway through and jumped it back to 63.8.
+
+The existing rule "never threshold on absolute brightness" was written about the ON
+frames. **It applies at least as strongly to the OFF frames**, which means the
+dark-frame integrity check ([05](05-vision-pipeline.md#the-strobe-difference-test))
+cannot be "OFF < some constant". It has to be a ratio against the ON frame in the same
+pair. A fixed floor tuned in a dark room would reject every honest attempt in daylight.
+
+The ratio is the only quantity here that stayed the same order of magnitude across
+both runs, and it is the one to threshold on.
+
+---
+
+## Probe 3c — recording to disk duplicates frames unless you stop it
+
+Found while building `tools/record.sh`. **This one silently corrupts a corpus**, so it
+is written up in full.
+
+Probes 3 and 3b use `-f null -`, which encodes nothing. The moment the same capture is
+written to a file with `-f rawvideo`, ffmpeg rate-converts the output to a constant
+30 fps and **duplicates frames** to fill it. A 30-frame capture came back as 15 distinct
+sensor frames, each written twice:
+
+```
+  0 agc   29.27560     1 agc   29.27560     2 agc   29.27560     3 agc   29.27560
+  ...
+ 20 ON    47.62171    21 ON    47.62171    22 off    0.00039    23 off    0.00039
+ 24 ON    72.89330    25 ON    72.89330    26 off    0.00066    27 off    0.00066
+```
+
+Every value appears exactly twice. The sensor's `ON,off,ON,off` becomes `ON,ON,off,off`
+on disk.
+
+**Why this is dangerous rather than merely annoying.** The file is exactly the expected
+size. Every individual frame is a valid, well-formed image. Nothing errors. The only
+symptom is that the ON/OFF pairing — which every liveness check in
+[05](05-vision-pipeline.md#the-strobe-difference-test) is built on — is wrong. A corpus
+recorded this way would produce plausible-looking numbers that mean nothing, and the
+thresholds derived from it would be garbage.
+
+**Fix:** `-fps_mode passthrough` on the output.
+
+```bash
+ffmpeg -f v4l2 -input_format gray -video_size 640x360 -framerate 30 -i "$dev" \
+       -frames:v 60 -fps_mode passthrough -f rawvideo -pix_fmt gray out.gray
+```
+
+With the flag, from our own analysis code rather than ffmpeg's:
+
+```
+tier: ir-strobe
+
+  0 agc   31.67136     1 agc   32.83174     2 agc   14.15270     3 agc   56.17587
+  4 agc    0.00030     5 ON    86.91084     6 off    0.00086     7 ON    85.42877
+  8 off    0.00096     9 ON    88.92887    10 off    0.00101    11 ON    88.07828
+  …
+ 56 off    0.00151    57 ON    79.53946    58 off    0.00145    59 ON    79.40342
+```
+
+**Independent confirmation of Probes 3 and 3b.** Different tool, different code path,
+same conclusion: 27 clean alternating pairs, AGC garbage in the first ~4 frames,
+monotonic-ish ON droop (86.9 → 79.4, −8.6%), nonzero OFF floor.
+
+Third data point on the OFF floor: **~0.0010** here, against 0.0040 and 0.0005 in the
+two earlier runs. Three sessions, three different orders of magnitude. The
+ratio-not-absolute rule holds up.
+
+**General lesson for the daemon**, beyond ffmpeg: never assume the frames you were
+handed are the frames the sensor produced. `faciolockd` reads V4L2 buffers directly and
+so is not exposed to this specific bug, but it *is* exposed to the same class — dropped
+buffers, repeated buffers, and reordering under load. ON/OFF phase must be
+re-established by measuring luma on every capture, never by assuming frame `n` is ON
+because frame `n-1` was OFF. Queued as a probe below.
+
+---
+
+## Probe 4 — device-node disambiguation
+
+Four `/dev/videoN` nodes, two physical cameras. Which node is which, and what is the
+stable name to put in config?
+
+```bash
+ls -l /dev/v4l/by-id/
+ls -l /dev/v4l/by-path/ | grep -v usbv2
+```
+
+```
+########## BY-ID
+usb-Sonix_Technology_Co.__Ltd._ASUS_FHD_webcam_SN0001-video-index0 -> ../../video0
+usb-Sonix_Technology_Co.__Ltd._ASUS_FHD_webcam_SN0001-video-index1 -> ../../video3
+
+########## BY-PATH
+pci-0000:00:14.0-usb-0:7:1.0-video-index0 -> ../../video0
+pci-0000:00:14.0-usb-0:7:1.0-video-index1 -> ../../video1
+pci-0000:00:14.0-usb-0:7:1.2-video-index0 -> ../../video2
+pci-0000:00:14.0-usb-0:7:1.2-video-index1 -> ../../video3
+```
+
+### Finding 1 — `by-id` cannot address the IR camera on this hardware
+
+**Two symlinks exist for four nodes, and neither one points at `/dev/video2`.**
+
+Both cameras are interfaces of a single USB device that reports one serial
+(`SN0001`), so udev generates the same `by-id` basename for both and the last writer
+wins. What survives is `-video-index0 → video0` (the **RGB** camera) and
+`-video-index1 → video3` (the IR **metadata** node, Finding 2). The actual IR camera
+has no `by-id` name at all.
+
+```bash
+readlink -f /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._ASUS_FHD_webcam_SN0001-video-index0
+# /dev/video0     ← the RGB camera
+```
+
+This invalidates a design decision. [04](04-architecture.md) and
+[05](05-vision-pipeline.md) both said to resolve the camera by `by-id` symlink rather
+than `videoN` because the numbering is unstable across boots. The instability is real,
+but `by-id` is not the fix here — it silently resolves to the **wrong camera**, which
+is worse than an unstable name that fails loudly.
+
+**`by-path` is unambiguous**: all four nodes appear, and the USB interface number
+separates the cameras — `…-usb-0:7:1.0-*` is the RGB pair, `…-usb-0:7:1.2-*` is the IR
+pair. It is stable across boots for as long as the device stays on the same port, which
+for an internal laptop camera is always.
+
+Cost: `by-path` encodes the PCI address, so it is machine-specific and must come from a
+per-machine probe rather than a shipped default. That was already the plan — the device
+path is written to config by `faciolockctl diagnose` after a one-time probe.
+
+### Finding 2 — half the nodes are not cameras
+
+```bash
+v4l2-ctl -d /dev/video3 --all | grep -E "Device Caps|Metadata|Sample Format"
+```
+
+```
+		Metadata Capture
+	Device Caps      : 0x04a00000
+Format Metadata Capture:
+	Sample Format   : 'UVCH' (UVC Payload Header Metadata)
+```
+
+`/dev/video1` and `/dev/video3` are **UVC payload-header metadata nodes**, one per
+camera. They expose no capture formats and can never yield a frame.
+
+Enumeration must filter on `V4L2_CAP_VIDEO_CAPTURE` before applying any IR heuristic.
+Without it the probe walks four nodes, two of which are guaranteed dead ends, and the
+"capture one frame and check chroma variance" fallback in
+[05](05-vision-pipeline.md#finding-the-ir-camera) would hang or error on them rather
+than cleanly skipping.
+
+### Resulting device-selection order
+
+1. Enumerate `/dev/video*`, **keep only nodes with `V4L2_CAP_VIDEO_CAPTURE`**
+2. Prefer a node offering `GREY` — on this machine that alone is decisive
+3. Tie-break on card-type name (`IR`, `Infrared`, `NIR`), then resolution
+4. Persist the choice as the **`by-path`** symlink, never `by-id`, never `videoN`
+
+---
+
+## Probe 5 — first corpus, and the first real security result
+
+Six captures, 90 frames each, 42 ON/OFF pairs each. Analysed with `spikes/probe`, not
+ffmpeg. Every capture classified `ir-strobe` from our own code.
+
+```
+RECORDING                          median       MAX(OFF/ON)   verdict@1e-3
+attack_floodlight_remote         7.18e-02        1.30e-01         REJECT
+live_dark_frontal                3.21e-06        5.36e-06          allow
+live_lit_angle_left              1.88e-06        5.03e-06          allow
+live_lit_frontal                 2.00e-06        3.76e-06          allow
+live_lit_frontal                 1.45e-06        4.43e-06          allow
+live_lit_glasses                 1.73e-06        3.88e-06          allow
+null_empty_room                  1.00e-05        1.54e-05          allow
+```
+
+**Dark-frame integrity is verified on real data.** Worst honest capture `1.54e-05`
+against an attack at `1.30e-01` — four orders of magnitude. A threshold at `1e-3` sits
+~65× above the worst live reading and ~130× below the attack. **Zero false rejections
+across 210 live pairs**, including a dark room and glasses.
+
+The catch, and it is the important part: the separation only holds when the burst is
+aggregated **conjunctively**. Per-pair, the attack read as clean 16.7% of the time,
+because an IR remote pulses. Full analysis: [B9](11-bug-log.md#b9).
+
+### What the corpus could not answer
+
+`falloffCV` came out unusable, for a reason unrelated to the missing print sample. Mean
+response per cell, % of peak:
+
+```
+live_lit_frontal                     null_empty_room
+   8   16   14   12   48  100          70   76   76   72   66   53
+   9   10   10   66   47   94          77   82   81   78   72   59
+   9    5   21   79   52   76          84   88   84   81   78   65
+   6   25   38   74   69   77          90   95   90   87   84   70
+  19   44   53   87   80   91          94  100   99   96   90   75
+  39   54   57   92   79   94          77   66   73   80   81   71
+```
+
+The "frontal" capture peaks in the **bottom-right corner**. The subject is at the edge
+of the centre-crop ROI, so the metric is measuring a subject-versus-background gradient
+rather than facial curvature — two captures of the same pose gave 0.31 and 0.64.
+
+**The falloff test needs a real face box before it can be evaluated at all.** See
+[B7](11-bug-log.md#b7). This is a second, independent blocker on the falloff claim,
+alongside the missing print.
+
+---
+
+## Reproducing this on other hardware
+
+For the [compatibility list](07-desktop-and-packaging.md#hardware-reality-check).
+Run Probes 1–4 and report:
+
+1. Which `/dev/videoN` reports `gray` / `Y800`
+2. Its resolution and frame rate
+3. Whether the YAVG series alternates (`ir-strobe`), stays flat and bright
+   (`ir-constant`), or stays flat and dark (emitter off — needs
+   `linux-enable-ir-emitter` as a one-time setup step)
+4. **Whether `by-id` addresses your IR camera, or collides as it does here** — this is
+   the one that most needs a second data point. If other vendors give their two UVC
+   interfaces distinct serials, `by-id` works for them and only Sonix-style shared
+   serials need `by-path`.
+
+Install `v4l-utils` and `ffmpeg` first. Substitute your own device node — the numbering
+is not stable across boots, which is why the daemon persists a `by-path` symlink rather
+than `videoN`. See Probe 4 for why not `by-id`.
+
+---
+
+## Still to probe
+
+- [ ] Behaviour in a fully dark room (does AGC push ON frames higher?)
+- [ ] Behaviour in bright sunlight (does ambient NIR lift the OFF frames?)
+- [x] Whether the OFF frames stay near-black with an IR remote pointed at the sensor
+      (validates the floodlight check) — **done, Probe 5. Check verified; found
+      [B9](11-bug-log.md#b9) in the process.**
+- [ ] A **continuous** IR illuminator, not a pulsed remote — the easier case, but
+      currently assumed rather than measured
+- [ ] An IR source **synchronised to the strobe phase** — the hard case B9 does not
+      cover. Needs a controllable emitter.
+- [ ] `v4l2-ctl --list-ctrls` — for the record, not because we intend to write any
+- [ ] Does the strobe phase (which of the pair comes first) survive a `STREAMOFF` /
+      `STREAMON` cycle, or must ON/OFF be re-classified by luma on every capture?
+      Assume the latter until measured.
+- [ ] `by-id` behaviour on non-Sonix hardware (see above)

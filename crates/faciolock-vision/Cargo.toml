@@ -1,0 +1,11 @@
+[package]
+name = "faciolock-vision"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# `tract` is the only dependency and Q2 decided it deliberately: the built binary
+# links libc, libm and libgcc_s and nothing else (wiki/08 Q2). Anything added here
+# lands in the daemon that parses V4L2 buffers, so it needs the same justification.
+[dependencies]
+tract-onnx = { workspace = true }
