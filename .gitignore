@@ -49,3 +49,38 @@ models/*.onnx
 # tools/gen-goldens.py. The alignment golden beside it IS committed -- it is a
 # synthetic checkerboard and contains no biometric data at all.
 crates/faciolock-vision/testdata/detect_golden.txt
+
+# ---------------------------------------------------------------------------
+# Credentials — NEVER commit
+# ---------------------------------------------------------------------------
+# An OpenSSH private key was committed and pushed on 2026-08-06 in commit "readme",
+# as `yes` / `yes.pub` — an `ssh-keygen` run where "yes" was typed at the filename
+# prompt, then swept up by `git add -A`. It was passphrase-protected, which bought
+# time and nothing more; the key still had to be rotated, because a passphrase is an
+# offline-brute-forceable last line and not a control.
+#
+# Patterns rather than those two filenames, because the next accident will have a
+# different name.
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.pem
+*.key
+*_rsa
+*_ed25519
+.ssh/
+# Any file whose first line is an OpenSSH/PEM private-key header cannot be matched by
+# a glob, so the real defence is `git add -p` or `git add <path>` over `git add -A`.
+#
+# And the two actual filenames, because none of the patterns above match a key called
+# `yes`. That is the point: the pattern list only catches keys that were named like keys.
+yes
+yes.pub
+
+# ---------------------------------------------------------------------------
+# Agent scratch
+# ---------------------------------------------------------------------------
+# Session logs and task trackers are working notes, not project documentation --
+# what they establish belongs in wiki/ and in the bug log, which are committed.
+.claude/
