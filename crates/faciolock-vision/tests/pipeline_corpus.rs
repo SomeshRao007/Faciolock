@@ -20,7 +20,7 @@ use std::time::Instant;
 use faciolock_vision::config::MatchConfig;
 use faciolock_vision::embed::{self, Embedder, Template};
 use faciolock_vision::pipeline::{enroll_template, Verdict};
-use faciolock_vision::{Burst, Config, Pipeline};
+use faciolock_vision::{Burst, BurstError, Config, Pipeline};
 
 const ENROL_ON: &str = "live_lit_frontal";
 
@@ -87,9 +87,13 @@ fn enrol_on_one_capture_and_verify_against_the_rest() {
             Ok(b) => pipe.verify(&b, &template),
             Err(e) => {
                 eprintln!("{:<26} {:>10} — burst rejected: {e:?}", cap.label, "-");
+                // A live capture must form a burst *unless* the ambient gate fired, in
+                // which case this hardware could not measure it and refusing is the
+                // correct, honest outcome (B18). Anything else is a false reject.
                 assert!(
-                    !cap.label.starts_with("live_"),
-                    "{}: a live capture must form a burst",
+                    !cap.label.starts_with("live_")
+                        || matches!(e, BurstError::AmbientTooBright { .. }),
+                    "{}: a live capture must form a burst unless gated for ambient, got {e:?}",
                     cap.label
                 );
                 continue;

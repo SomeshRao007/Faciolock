@@ -1,0 +1,18 @@
+[package]
+name = "faciolock-daemon"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "faciolockd"
+path = "src/main.rs"
+
+[dependencies]
+faciolock-camera = { workspace = true }
+faciolock-ipc = { workspace = true }
+faciolock-vision = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }

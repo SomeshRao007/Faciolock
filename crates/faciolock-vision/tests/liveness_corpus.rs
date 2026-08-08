@@ -157,22 +157,35 @@ fn the_floodlight_attack_is_rejected_and_live_captures_are_not() {
 
     for r in &replays {
         let Some(rep) = &r.report else {
-            // A capture that could not even become a burst is a rejection, and for the
-            // attack class that is a correct outcome. For a live capture it is not.
-            assert!(
-                !r.label.starts_with("live_"),
-                "{}: live capture failed to form a burst: {:?}",
-                r.label,
-                r.burst_error
-            );
+            // A capture that could not become a burst is a rejection. For the attack class
+            // that is a correct outcome outright.
+            //
+            // For a *live* capture it is correct only when the ambient gate fired: the
+            // room was too bright in near-infrared for this hardware to measure liveness
+            // at all, so refusing is the honest answer and PAM falls through to the
+            // password prompt (B18). Any other reason is a genuine false reject.
+            if r.label.starts_with("live_") {
+                let why = r.burst_error.as_deref().unwrap_or("(none)");
+                assert!(
+                    why.contains("AmbientTooBright"),
+                    "{}: live capture failed to form a burst for a reason that is not the \
+                     ambient gate: {why}",
+                    r.label
+                );
+                eprintln!("  GATED  {}: {why}", r.label);
+            }
             checked += 1;
             continue;
         };
 
         if r.label.starts_with("live_") {
+            // Any live capture that got *past* the ambient gate is one this hardware can
+            // measure, so it must pass cleanly. There is no longer a tolerated-failure
+            // branch here: B18's daylight false-reject is handled above, by refusing to
+            // measure rather than by measuring wrongly.
             assert!(
                 rep.rejection().is_none(),
-                "{}: honest capture rejected by {:?}",
+                "{}: honest capture inside the measurable ambient range was rejected by {:?}",
                 r.label,
                 rep.rejection()
             );

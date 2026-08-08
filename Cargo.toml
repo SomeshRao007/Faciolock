@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/faciolock-vision"]
+members = [
+    "crates/faciolock-camera",
+    "crates/faciolock-daemon",
+    "crates/faciolock-ipc",
+    "crates/faciolock-vision",
+]
 
 # The Phase 0 spikes are throwaway (wiki/09) and keeping them out of the workspace
 # keeps their dependency trees out of the real crates'. Phase 3 asserts in CI that
@@ -15,6 +20,25 @@ publish = false
 
 [workspace.dependencies]
 tract-onnx = "0.23.4"
+
+# Capture. Chosen over hand-rolled ioctls (P2-a, wiki/README) for one reason: it gets the
+# kernel struct layouts right on every architecture Debian builds for, and armhf/arm64/
+# riscv64 cannot be tested here. Three defects are worked around at every call site --
+# see `faciolock-camera`'s crate docs.
+v4l = "0.14"
+
+# Daemon-only. Both are already in the Ubuntu archive at current versions, so unlike the
+# capture crates these cost nothing on the upstreaming path (P2-b). They must never appear
+# in faciolock-vision, whose single-dependency story is a security claim, nor in
+# faciolock-pam, whose dependency tree CI asserts is libc + faciolock-ipc.
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+sha2 = "0.10"
+libc = "0.2"
+
+faciolock-camera = { path = "crates/faciolock-camera" }
+faciolock-ipc = { path = "crates/faciolock-ipc" }
+faciolock-vision = { path = "crates/faciolock-vision" }
 
 [profile.release]
 debug = true

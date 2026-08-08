@@ -264,6 +264,55 @@ pub struct Config {
     /// B9's four-orders-of-magnitude margin was also computed at two pairs; fewer has
     /// never been measured.
     pub min_pairs: usize,
+    /// Ambient near-infrared above which this hardware **cannot verify liveness at all**,
+    /// measured as the dimmest frame mean in the burst.
+    ///
+    /// Not a liveness check. A gate in front of them, and the honest answer to
+    /// [B18](../../../wiki/11-bug-log.md): in bright ambient IR the emitter's contribution
+    /// stops carrying the signal every check depends on, and a floodlight attack measured
+    /// *more live-looking than a real face* on every statistic tried. There is no cleverer
+    /// arrangement of those terms that recovers a separation which is not in the signal, so
+    /// the system detects the condition and refuses instead of guessing.
+    ///
+    /// **Why the ambient floor and not a ratio or an SNR.** It is the only candidate an
+    /// attacker can move in one direction only. Raising ambient raises the floor, which
+    /// closes the gate — fail-closed. A gate keyed on emitter-to-ambient ratio or on SNR
+    /// puts an attacker-raisable term where it would hold the gate *open*, which is the
+    /// synchronised-injection case B9 never covered.
+    ///
+    /// **Where 0.04 comes from.** It is the point at which
+    /// [`LivenessConfig::dark_ratio_max`] stops working, derived rather than picked. That
+    /// check rejects when `mean(OFF)/mean(ON) > 1e-3`; with an ambient floor `F` and an
+    /// emitter amplitude `A`, that ratio is about `F/(F+A)`, so it holds only while
+    /// `F < A/999`. The weakest live amplitude measured is 48, giving **F < 0.048** — and
+    /// the gate sits just under that, not on it. A gate placed *above* the break-even
+    /// would admit captures the dark-frame check then false-rejects, which is the confusing
+    /// failure this is meant to replace. `the_gate_closes_before_the_dark_frame_check_breaks`
+    /// pins the relationship rather than the number, so re-tuning either one keeps them
+    /// consistent.
+    ///
+    /// Measured floors either side of it:
+    ///
+    /// ```text
+    /// dark / lamp-lit room (7 captures)   0.0001 – 0.0020    <- 25x under the gate
+    /// blinds half closed                          0.92       <- gated out
+    /// blinds open                          20.33 – 51.74     <- gated out
+    /// ```
+    ///
+    /// Note the third of those includes a *midday* capture taken with the blinds closed
+    /// under a ceiling light, which read 0.0000: electric light emits almost no NIR, so
+    /// this gate is about light, not about the clock.
+    ///
+    /// **Gating half-blinds out is a real usability loss and it is accepted knowingly** —
+    /// `dark_ratio_max` already rejects that capture (0.026 against its 1e-3), so the gate
+    /// costs no working case that exists today. It converts a confusing biometric failure
+    /// into an honest "too bright to verify".
+    ///
+    /// **Provisional.** One machine, one subject, and no attack recording between 0.92 and
+    /// 20.33 — so the level at which attack/live separation actually dies is bracketed, not
+    /// located. The ambient sweep closes that. This will end up per-machine config with a
+    /// `diagnose`-time measurement behind it.
+    pub ambient_floor_max: f64,
     pub liveness: LivenessConfig,
     pub detect: DetectConfig,
     pub matching: MatchConfig,
@@ -275,6 +324,7 @@ impl Default for Config {
             tier: Tier::IrStrobe,
             agc_settle_frames: 5,
             min_pairs: 2,
+            ambient_floor_max: 0.04,
             liveness: LivenessConfig::default(),
             detect: DetectConfig::default(),
             matching: MatchConfig::default(),
@@ -318,6 +368,35 @@ mod tests {
     #[test]
     fn min_pairs_is_never_zero() {
         assert!(Config::default().min_pairs >= 2);
+    }
+
+    /// The gate exists to close before `dark_ratio_max` starts lying, so it has to sit
+    /// under the floor at which that check begins false-rejecting honest captures.
+    ///
+    /// `mean(OFF)/mean(ON) ~ F/(F+A)`, so the dark check survives only while
+    /// `F < A/999`. Anchored to the weakest live emitter amplitude ever measured.
+    #[test]
+    fn the_gate_closes_before_the_dark_frame_check_breaks() {
+        const WEAKEST_LIVE_AMPLITUDE: f64 = 48.0;
+        let c = Config::default();
+        let breaks_at = WEAKEST_LIVE_AMPLITUDE * c.liveness.dark_ratio_max.value
+            / (1.0 - c.liveness.dark_ratio_max.value);
+        assert!(
+            c.ambient_floor_max <= breaks_at,
+            "gate at {} sits above {breaks_at}, where dark_ratio_max starts false-rejecting",
+            c.ambient_floor_max
+        );
+    }
+
+    /// And it must stay clear of the noisiest honest dark capture, or it gates out the
+    /// conditions the whole system is calibrated for.
+    #[test]
+    fn the_gate_does_not_close_on_a_dark_room() {
+        const NOISIEST_DARK_FLOOR: f64 = 0.0020; // null_empty_room
+        assert!(
+            Config::default().ambient_floor_max > NOISIEST_DARK_FLOOR * 10.0,
+            "gate leaves under 10x margin over the noisiest measured dark capture"
+        );
     }
 
     /// Matching is k-of-n. If k ever equals n it has silently become conjunctive, which
