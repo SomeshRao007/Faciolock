@@ -397,6 +397,51 @@ alongside the missing print.
 
 ---
 
+## Probe 6 — the delivered frame rate is not the advertised one
+
+Every earlier probe in this file reports **30 fps**, and every one of them got that number
+from the device rather than from a clock. `ffplay`'s stream header, `VIDIOC_G_PARM` and
+`record.sh`'s sidecar all report the rate that was *configured*.
+
+Measured from kernel buffer timestamps (`v4l2_buffer.timestamp`, stamped by `uvcvideo` at
+capture), 30 frames, 2026-08-06:
+
+```
+frame interval   min 63.8 ms   p50 68.0 ms   max 68.1 ms
+delivered rate   14.7 fps
+```
+
+Steady, not jitter — the spread across 29 intervals is 4 ms. Two `ffmpeg` captures the same
+morning independently read **12.11 and 12.12 fps** over 90 frames.
+
+**So "15 ON/OFF pairs per second" was never measured either**; the real figure is ~6–7.
+Consequences are in [B19](11-bug-log.md#b19) and the budget restatement in
+[06](06-performance-budget.md).
+
+**Settled 2026-08-06: the rate is *not* ambient-driven.** A controlled pair two minutes
+apart, one with the blinds open and one with them closed under a ceiling light:
+
+```text
+capture                       ambient pedestal   fps delivered
+live_daylight_frontal   12:14            51.74           12.11
+attack_floodlight_dayl  12:14            20.33           12.01
+live_night_lamp         12:16             0.00           12.15
+```
+
+The ambient floor moves from 51.74 to 0.00 and the frame rate does not move at all. So
+**~12 fps is simply what this camera delivers**, and the 30 fps in every earlier probe was
+the advertised figure. The halved rate and [B18](11-bug-log.md#b18) are independent
+findings that arrived together.
+
+The same pair is also the controlled experiment that confirms B18's mechanism: same
+machine, same hour, one variable changed. And note the third row is a *midday* capture with
+an ambient floor of zero — **ceiling light emits essentially no near-infrared, so "night"
+here is an optical condition, not a time.** That is why the corpus recorded after dark and
+the corpus recorded under a lamp at noon are the same condition, and why nothing in the
+project noticed the variable until sunlight reached the sensor.
+
+---
+
 ## Reproducing this on other hardware
 
 For the [compatibility list](07-desktop-and-packaging.md#hardware-reality-check).
@@ -421,7 +466,17 @@ than `videoN`. See Probe 4 for why not `by-id`.
 ## Still to probe
 
 - [ ] Behaviour in a fully dark room (does AGC push ON frames higher?)
-- [ ] Behaviour in bright sunlight (does ambient NIR lift the OFF frames?)
+- [x] **Behaviour in daylight (does ambient NIR lift the OFF frames?)** — **YES, and it
+      broke the project's liveness statistics.** OFF frames go from ~0.004 to ~93, a factor
+      of ~24,000, and the emitter's contribution falls from dominating to ~13% of the
+      signal. Full write-up: [B18](11-bug-log.md#b18). This probe was on the list before
+      the measurement arrived; the backlog was right and the measurement beat it to it.
+- [x] **`v4l2-ctl --list-ctrls`** — for the record, and the record is short: this device
+      exposes **no exposure or gain controls at all**, only `region_of_interest_*` and a
+      read-only `privacy` bool. The AGC is entirely internal and opaque, so "just shorten
+      the exposure" is not available without vendor UVC extension-unit writes — which is
+      the thing [Q3](08-open-questions.md#q3--ir-emitter--resolved-no-emitter-code-at-all)
+      deleted from the project, along with the USB-bus-hang hazard.
 - [x] Whether the OFF frames stay near-black with an IR remote pointed at the sensor
       (validates the floodlight check) — **done, Probe 5. Check verified; found
       [B9](11-bug-log.md#b9) in the process.**

@@ -22,7 +22,8 @@ median of 50 iterations after 10 warm-up.
 | Stage | ms | Basis |
 |---|---|---|
 | `connect()` + request | 1 | estimate |
-| Frame burst (6 frames @ 30 fps) | 130 | **estimate — the weakest number here** |
+| ~~Frame burst (6 frames @ 30 fps)~~ | ~~130~~ | ~~estimate~~ |
+| **Frame burst (6 frames @ 14.7 fps)** | **404** | **measured** — p50 of 50 trials from a warm streaming session, p95 408, p99 408 |
 | Burst build + ON/OFF pairing | **0.3** | measured |
 | Liveness, pre-box | **0.6** | measured |
 | YuNet detection (×1) @ 320×320 | **33.3** | measured |
@@ -30,10 +31,31 @@ median of 50 iterations after 10 warm-up.
 | Alignment ×3 | **0.8** | measured |
 | SFace embedding ×3 | **230.6** | measured, 76.9 ms each |
 | Match + policy + response | 2 | estimate |
-| **Total** | **~399 ms** | |
+| **Total** | **~673 ms** | |
 
-**p95 target: ≤ 400 ms. This meets it with essentially no headroom**, and two caveats
-that must not be dropped when quoting the number:
+**p95 target: ≤ 400 ms. The warm path misses it by 1.7×, and the frame burst alone
+exceeds it.** Measured 2026-08-06, and the two things that moved are worth separating:
+
+- **The rate was never 30 fps.** Delivered is 14.7 fps; 30 was the advertised figure and
+  nothing had ever timed it ([B19](11-bug-log.md#b19)). Six frames span 340 ms of sensor
+  time on that clock.
+- **The 130 ms estimate was impossible under its own assumption anyway.** Six frames at
+  33.3 ms span ≥167 ms first-to-last. The arithmetic was wrong independently of the
+  hardware.
+
+The remaining ~64 ms between the 340 ms sensor span and the 404 ms wall clock is the
+queue flush and phase alignment — what P2-c's fresh-frames-only rule costs, and it is
+cheap for what it buys.
+
+**What this rules out.** The gap is 273 ms and the only line items big enough to close it
+are the burst itself and SFace. Dropping to 2-of-2 matching saves 77 ms; re-opening Q2 for
+`ort` saves ~118 ms; together that is 195 ms and still misses. **The burst is sensor-bound
+and cannot be optimised at all** — it is the shutter, not the code. So the honest options
+are to restate the target, or to overlap capture with compute: SFace's 231 ms can run
+inside the 340 ms the sensor is still exposing, which would hide almost all of the
+inference. That is a pipeline change and needs its own decision entry.
+
+Two caveats that must not be dropped when quoting any of this:
 
 1. **Summing per-stage p50s does not give a p95.** The measured figures are medians of
    each stage in isolation. A real p95 for the whole path needs `faciolockctl bench`,

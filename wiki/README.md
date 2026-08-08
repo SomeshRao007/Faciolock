@@ -9,6 +9,19 @@ no camera, no sockets and no PAM. 78 tests, of which the ones that need neither 
 recordings nor the models always run. Detection and alignment are pinned against
 independent OpenCV references, which is what caught [B16](11-bug-log.md#b16).
 
+**Phase 2 in progress.** `crates/faciolock-camera` (V4L2 capture, IR discovery) and
+`crates/faciolock-ipc` (the wire types) are built. First contact with real hardware found
+[B18](11-bug-log.md#b18) — every strobe statistic was a ratio, and ambient daylight
+saturates a ratio — which is now fixed by moving to the difference domain and by an
+**ambient gate**: above a measured floor this hardware reports "cannot verify" and PAM
+falls through to the password, rather than guessing. That is the honest ceiling, and it
+is where the class sits: Windows Hello fails the same way with purpose-built optics, and
+Howdy passes in daylight by checking nothing.
+
+The frame burst is now **measured at 404 ms** against a 130 ms estimate
+([B19](11-bug-log.md#b19)), so the warm path is ~673 ms against a 400 ms target and
+[06](06-performance-budget.md) is restated.
+
 ## Index
 
 | Page | What's in it |
@@ -53,6 +66,14 @@ under 400 ms wall-clock, zero RSS when idle.
 | P1-c | CI corpus is **synthetic and committed**; the real recordings stay local | 2026-08-04 |
 | P1-e | Capability tier is **enrolment-time config, never inferred per burst** | 2026-08-04 |
 | P1-f | Detector runs at **320×320** — measured on embedding accuracy, not latency ([B13](11-bug-log.md#b13)) | 2026-08-04 |
+| P2-a | **`v4l` crate** for capture, not hand-rolled ioctls — correct struct layouts on architectures that cannot be tested here | 2026-08-06 |
+| P2-b | **`toml` + `serde`** for daemon config; both already in the archive, so no packaging cost | 2026-08-06 |
+| P2-c | **Fresh frames only** — camera stays warm and streaming, queue flushed at request time | 2026-08-06 |
+| P2-d | **Copy-out, not zero-copy** — 1.4 MB and ~150 µs against a 400 ms budget; the memory-budget argument for zero-copy was wrong by three orders of magnitude | 2026-08-06 |
+| P2-e | **Strobe statistics move to the difference domain**; a ratio saturates against ambient IR ([B18](11-bug-log.md#b18)) | 2026-08-06 |
+| P2-f | **Ambient gate at floor 0.04**, before any biometric work. Above it the answer is "cannot verify", not a guess | 2026-08-06 |
+| P2-g | **`Environment` is exempt from the failure budget** — weather must not disable face unlock | 2026-08-06 |
+| P2-h | **No RGB camera in v1.** Measured: it cannot see the emitter (SNR 0.85 vs the IR camera's 1,500–15,000), so it cannot do strobe liveness. AND-ing it in would rely on a branch that reads *true* for attackers in daylight; OR-ing it in lets a photo unlock. Deferred to v2 as an explicit opt-in tier | 2026-08-06 |
 
 Still open: Q4 (IPC), Q5 (TPM timing), Q9 (name), and whether the real recordings are ever
 published (deferred to ITP — publishing is irreversible, so it is not decided early).
@@ -80,10 +101,22 @@ hardware and resolves to the RGB camera —
 
 ## Verified so far
 
+> **Every capture below except the daylight ones was recorded after dark, and until
+> 2026-08-06 nothing recorded that fact.** Ambient near-infrared turned out to be the
+> variable the whole corpus was uniform in, and it breaks every ratio-domain statistic
+> ([B18](11-bug-log.md#b18)). Rows are qualified accordingly. A claim measured in one
+> lighting condition is a claim about that condition.
+
 | Claim | Status |
 |---|---|
-| Hardware self-strobes, 15 ON/OFF pairs/sec | **measured**, 3 independent runs |
-| Dark-frame integrity rejects an IR floodlight | **verified** — 4 orders of magnitude margin, 0 false rejects in 210 live pairs |
+| Hardware self-strobes, every frame | **measured**, 4 independent runs, and now in daylight too — the emitter never stops |
+| ~~15 ON/OFF pairs/sec~~ | **withdrawn.** 30 fps was the *advertised* rate; delivered is 12–15 fps, so ~6–7 pairs/sec ([B19](11-bug-log.md#b19)) |
+| Dark-frame integrity rejects an IR floodlight | **verified at negligible ambient IR only** — 4 orders of margin and 0 false rejects across 210 live pairs, all nocturnal. In daylight the same check rejects **100% of honest captures** (0.664 against a 0.001 threshold). The check is a ratio and ambient light is an offset ([B18](11-bug-log.md#b18)) |
+| The strobe is detectable in daylight | **verified** — as a *difference*: SNR 549 whole-frame, 882 over the face box, sign regularity 1.000. `classify` was rewritten to measure it ([B18](11-bug-log.md#b18)) |
+| Liveness can be **distinguished from a floodlight attack** above an ambient floor of ~1 | **refuted, by a matched pair** — same room, same position, 90 s apart, ambient within 1% (13.91 vs 14.05). Every statistic ranked the attack as *more live-looking than the operator's real face*. A hardware ceiling, not a tuning problem ([B18](11-bug-log.md#b18)) |
+| Faciolock works in a normally lit daytime room | **no, and this is now a stated non-goal** ([01](01-goals-and-scope.md)). A large room with indirect sun ~10 m away reads 13.91 — 348× over the gate. It authenticates in dim and artificially-lit rooms and refuses otherwise |
+| The RGB camera could supply liveness where IR cannot | **refuted by measurement** — it has an IR-cut filter and cannot see the emitter at all: strobe amplitude 0.049 and SNR 0.85 against the IR camera's 48–81 and 1,500–15,000 |
+| YuNet detects a face in **daylight** IR | **verified** — and the face-box emitter response is 2.2× the whole-frame one, as inverse-square predicts |
 | One contaminated pair sinks a burst (conjunctive aggregation) | **verified** — replayed in CI on synthetic and recorded captures |
 | YuNet detects a face in **near-infrared** | **verified** — 4/4 live captures, 0 on an empty room, 0 on the floodlight attack |
 | SFace embeddings discriminate on **near-infrared** | **verified** — genuine cross-capture cosine 0.60–0.90 against a 0.363 threshold |

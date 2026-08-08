@@ -14,10 +14,10 @@
 //! reflectance — and it does not try to. Thresholds are calibrated against the local
 //! recordings, and the numbers behind each one are recorded in `config.rs`.
 
-use faciolock_vision::config::{Threshold, Tier};
+use faciolock_vision::config::Threshold;
 use faciolock_vision::liveness::{self, Check};
 use faciolock_vision::testing::{blank, domed, flat, strobe, strobe_one_contaminated};
-use faciolock_vision::{Burst, BurstError, Config, Rect};
+use faciolock_vision::{Burst, BurstError, Config, Observed, Rect};
 
 const W: usize = 96;
 const H: usize = 96;
@@ -84,28 +84,63 @@ fn a_degenerate_flat_presentation_is_rejected() {
     assert_eq!(r.check, Check::Falloff);
 }
 
-/// Tier is configuration, never inference. A capture that stops alternating — which any
-/// attacker with a bright enough continuous IR source can produce at will — must be
-/// refused, not served by the weaker checks a constant-illumination tier would run.
+/// Tier is configuration, never inference. A steadily-lit capture — which any attacker with
+/// a bright enough continuous IR source can produce at will — must be refused, never served
+/// by the weaker checks a constant-illumination tier would run.
+///
+/// Since [B18] the *ambient gate* answers first, and more accurately: a uniformly lit frame
+/// means a bright room, so "too bright to verify" beats "wrong illumination pattern". The
+/// property being defended is unchanged — no constant capture yields a burst — so this
+/// asserts that across the brightness range rather than pinning one error.
+///
+/// [B18]: ../../../../wiki/11-bug-log.md
 #[test]
 fn constant_illumination_is_refused_rather_than_downgraded() {
     let c = cfg();
-    let bytes = blank(W, H, 60).repeat(12);
-    match Burst::from_planar(&bytes, W, H, &c) {
-        Err(BurstError::TierMismatch { configured: Tier::IrStrobe, .. }) => {}
-        other => panic!("expected a tier mismatch, got {:?}", other.map(|_| "a burst")),
+    match Burst::from_planar(&blank(W, H, 60).repeat(12), W, H, &c) {
+        Err(BurstError::AmbientTooBright { floor }) => {
+            assert!((floor - 60.0).abs() < 0.5, "floor {floor} should be the frame mean")
+        }
+        other => panic!("expected the ambient gate, got {:?}", other.map(|_| "a burst")),
+    }
+
+    for level in [0u8, 1, 30, 60, 200, 255] {
+        assert!(
+            Burst::from_planar(&blank(W, H, level).repeat(12), W, H, &c).is_err(),
+            "constant illumination at {level} produced a burst"
+        );
     }
 }
 
 /// Conjunction over an empty set is true, so a burst that yields too few pairs must be
 /// refused outright. Otherwise every check that was meant to inspect it passes vacuously.
+///
+/// Three frames, not two. Since [B18] the noise floor is measured from same-phase pairs,
+/// which a two-frame capture does not contain, so `ON, OFF, ON` is now the shortest capture
+/// that classifies as a strobe at all while still yielding fewer pairs than the floor.
+///
+/// [B18]: ../../../../wiki/11-bug-log.md
 #[test]
 fn a_burst_below_the_pair_floor_is_refused() {
+    let c = cfg();
+    let on = domed(W, H, 60, 8);
+    let off = blank(W, H, 0);
+    let bytes = [on.as_slice(), off.as_slice(), on.as_slice()].concat();
+    assert!(matches!(
+        Burst::from_planar(&bytes, W, H, &c),
+        Err(BurstError::TooFewPairs { got: 1, need: 2 })
+    ));
+}
+
+/// And a capture too short to measure its own noise floor is refused earlier, naming the
+/// real problem. "Unmeasurable" must never become a way through.
+#[test]
+fn a_capture_too_short_to_measure_is_not_a_strobe() {
     let c = cfg();
     let bytes = strobe(&domed(W, H, 60, 8), &blank(W, H, 0), 1);
     assert!(matches!(
         Burst::from_planar(&bytes, W, H, &c),
-        Err(BurstError::TooFewPairs { got: 1, need: 2 })
+        Err(BurstError::TierMismatch { observed: Observed::Irregular, .. })
     ));
 }
 

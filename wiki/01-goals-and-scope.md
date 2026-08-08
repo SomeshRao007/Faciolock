@@ -35,6 +35,25 @@ cannot go in the archive.
   Liveness on RGB alone is a research problem; on IR it is mostly physics.
 - **No cloud, no network.** The daemon runs with `PrivateNetwork=yes`.
 - **No GPU requirement.** CPU-only must hit the budget. GPU/NPU is optional later.
+- **Not a daylight system, on the reference hardware.** Added 2026-08-08 from measurement,
+  not from preference. Strobe liveness works by comparing an emitter-lit frame against a
+  dark one, and ambient near-infrared lifts both. Above an ambient floor of roughly 1 the
+  margin is gone: a matched pair at floor ~14 measured a floodlight attack as **more
+  live-looking than the operator's real face on every statistic tried**
+  ([B18](11-bug-log.md#b18)).
+
+  So Faciolock authenticates in **dim and artificially-lit rooms** — evening, night,
+  curtains drawn, ceiling light — and **refuses** in a daytime room with a real window,
+  reporting `Environment` so PAM falls through to the password. A large room whose only
+  sunlight is indirect and ~10 m away already reads 13.91.
+
+  This is a property of the sensor, not of the design. Purpose-built face-auth optics use a
+  940 nm emitter behind a narrow bandpass filter, because 940 nm sits inside a solar
+  water-vapour absorption band; that hardware would see a far lower floor in the same room.
+  The reference camera offers neither, and exposes no exposure or gain control to
+  compensate. **Widening this is a hardware-compatibility question, not a tuning one** —
+  it belongs in the compatibility list, and it is the strongest argument for testing
+  940 nm hardware before any claim about daylight is made.
 
 ## Why Rust
 

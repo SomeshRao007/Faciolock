@@ -1,0 +1,19 @@
+[package]
+name = "faciolock-camera"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# `v4l` and nothing else, deliberately. This crate exists as a crate rather than a module
+# inside `faciolock-daemon` so that Phase 5's `faciolockctl diagnose` -- the tool that has
+# to work *when the daemon is broken* -- can enumerate and probe cameras without linking
+# `tract`. wiki/06 budgets the CLI at ~2 MB and the daemon at ~25 MB; the difference is
+# exactly this boundary.
+[dependencies]
+v4l = { workspace = true }
+
+# Dev-only, and only in `tests/hardware.rs`, which needs the real ON/OFF classifier to
+# check that what comes off the sensor still alternates. Dev-dependencies do not
+# propagate, so the shipped crate still links `v4l` and nothing else.
+[dev-dependencies]
+faciolock-vision = { workspace = true }

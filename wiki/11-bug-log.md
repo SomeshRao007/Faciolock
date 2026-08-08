@@ -9,6 +9,8 @@ to fix.
 
 | # | Bug | Severity | Status |
 |---|---|---|---|
+| [B19](#b19) | Corpus sidecars recorded the **requested** frame rate as if it were measured | medium | fixed; delivered rate is 12–15 fps, never 30 |
+| [B18](#b18) | Every strobe statistic is a **ratio**, and ambient IR saturates a ratio | **critical** | `classify` fixed; ambient **gate** shipped; threshold provisional |
 | [B17](#b17) | Response test does **not** reject a screen — the statistic is whole-frame | **high** | design finding, open |
 | [B16](#b16) | Alignment sampled at a **half-pixel offset** from OpenCV's convention | **high** | fixed; found only by an external golden |
 | [B15](#b15) | Latency benchmark ran inside the CPU's boost window and reported **half** the real cost | medium | corrected; warm-up + 50 samples |
@@ -26,6 +28,287 @@ to fix.
 | [B3](#b3) | `2>/dev/null` hid a missing binary as "no evidence" | medium | documented |
 | [B2](#b2) | Half the `/dev/videoN` nodes are not cameras | low | fixed |
 | [B1](#b1) | Dead conditional in `build_pairs` | trivial | removed |
+
+---
+
+## B19 — The corpus recorded the frame rate it asked for {#b19}
+
+**Severity: medium.** Found alongside [B18](#b18) and worth its own entry, because it is
+the reason the latency budget was wrong for four days without anybody being able to notice.
+
+`tools/record.sh` wrote `"fps": 30` into every sidecar. 30 is the value it passed to
+`ffmpeg`, not a value it observed. `VIDIOC_G_PARM` also reports 30, because that too is the
+*configured* rate. So every tool in the project agreed on a number that nothing had
+measured.
+
+Measured from kernel buffer timestamps on 2026-08-06:
+
+```
+p50 inter-frame interval   68.0 ms   (min 63.8, max 68.1 — steady, not jitter)
+delivered rate             14.7 fps
+sidecar-recorded rate      30 fps
+```
+
+`record.sh` now times the capture and writes `fps_delivered`, `elapsed_s`, and a
+free-text `ambient` field, plus `recorded_local` so the time of day is legible without
+timezone arithmetic. The first two captures taken with it read **12.11 fps**.
+
+### What it cost
+
+[06](06-performance-budget.md) budgets the frame burst at 130 ms for 6 frames, which
+assumed 30 fps. Two things follow, and the second is worse than the first:
+
+1. At the delivered rate a 6-frame burst spans **~340–410 ms** — the entire 400 ms p95
+   target, before a single inference runs.
+2. **The 130 ms figure was never achievable even under its own assumption.** Six frames at
+   33.3 ms spacing span ≥167 ms first-to-last. The arithmetic was wrong independently of
+   the hardware.
+
+### The lesson, which is [B4](#b4)'s in a new place
+
+B4 was a capture with *no* sidecar. This is a capture with a sidecar that **states a
+parameter it never checked**, which is worse: the missing sidecar announces its absence,
+while the wrong one is quoted with confidence. Anything a sidecar records as a measurement
+must be observed after the fact, never copied from the request.
+
+---
+
+## B18 — Every strobe statistic is a ratio, and ambient light saturates a ratio {#b18}
+
+**Severity: critical.** A *design* bug, found the first time the camera was read outside
+the hours the corpus happened to be recorded in. It made the reference machine unable to
+authenticate at all in daylight, and it invalidated the one liveness threshold the project
+had ever called verified.
+
+### What happened
+
+Phase 2's capture layer was run against the real camera at 09:16 IST. The machine
+classified as `ir-constant`, not `ir-strobe`, so no burst formed and every authentication
+would have been refused.
+
+Confirmed across three independent code paths — the new Rust capture layer, a raw `ffmpeg
+signalstats` run using [10/Probe 3](10-hardware-probe.md#probe-3--per-frame-mean-luma-the-decisive-test)'s
+own command, and `spikes/probe`, the unchanged Phase 0 binary that produced Probe 3's
+numbers. `dpkg.log` shows no kernel, firmware or `uvcvideo` change since the corpus was
+recorded, so this is not a driver regression.
+
+### The emitter never stopped
+
+This is the part that was misdiagnosed for the first hour, and getting it wrong would have
+led to a redesign that was not needed.
+
+The emitter fires **every frame, perfectly regularly, with no missed beats**, in daylight
+exactly as at night. What collapsed is the *statistic*:
+
+```text
+                     ambient floor   amplitude   same-phase noise      SNR   ratio test
+live, nocturnal ×5          0.0002       54–81        0.005–0.047   1,525+     Strobing
+live, daylight               51.74       32.99              0.060      549   Constant  <-
+floodlight attack            0.0004       53.11              0.999       53     Strobing
+```
+
+`classify` asked `hi > lo * 10` — a **ratio**. Ambient near-infrared adds a pedestal to
+both phases, and a ratio saturates against a pedestal: 15,000:1 at night becomes 1.15:1 at
+9am while the emitter's actual contribution barely moves. Both frames carry a full
+structured scene (sd ≈ 53, min 12, max 253), so this is ambient light forming an image, not
+gain-amplified noise.
+
+**Every corpus recording was made after dark** — `20260803T183445Z` is 00:04 IST,
+`20260804T145045Z` is 20:20 IST — and nothing in the sidecars recorded that, so the entire
+corpus described one lighting condition without saying so. The variable was invisible
+because it was constant. [10](10-hardware-probe.md)'s "Still to probe" list had predicted
+exactly this measurement and it arrived before the probe was run.
+
+### What was fixed
+
+`frame::classify` now measures a **difference**, which a pedestal cannot touch: the median
+step between neighbouring frames over the median step between frames of the *same* phase —
+a noise floor measured on the capture itself, since Probe 3b showed that floor move tenfold
+between two runs on one machine.
+
+Phase assignment changed with it, from a split of the global range to a comparison against
+**immediate neighbours**. The global split held only while a capture's drift stayed under
+the emitter's amplitude; in daylight the ON series climbed 105 → 116 while OFF climbed
+92 → 102, leaving 3.5 levels of headroom on a 14-level amplitude. A slightly longer capture
+would have put a late OFF frame above an early ON one and mislabelled both silently.
+
+The daylight capture now classifies as `Strobing` and forms a burst.
+
+### What is still open, and it is the important half
+
+**`dark_ratio_max` is also a ratio** — `mean(OFF)/mean(ON) > 1e-3 → reject` — and it is the
+project's only `Enforced`, corpus-verified threshold. The daylight capture reads **0.664
+against a threshold of 0.001, with all 42 pairs failing.** Honest captures in daylight
+still cannot authenticate; they are now refused one layer later, by liveness rather than by
+tier conformance.
+
+Three replacements were measured, all kept per-pair so [B9](#b9)'s conjunctive rule
+survives. A burst-level SNR floor was rejected without measuring: it is an average, and B9
+is precisely the finding that averaging liveness across a burst is a 1-in-36 bypass.
+
+```text
+                          old ratio   A: vs median   B: vs neighbours   C: pair response
+live, nocturnal ×6           0.0000         0.0000             0.0000      0.056–0.143
+live, daylight               0.7389         0.3095             0.1428           0.0966
+floodlight attack, night     0.0867         0.0308             0.0484           0.2979
+floodlight attack, DAYLIGHT  0.4907         0.1487             0.0249           0.0781   <-
+spoof_phone                  0.0002         0.0001             0.0000           0.2727
+```
+
+**All four statistics are refuted, and the daylight attack is what refutes them.**
+
+Against the nocturnal attack alone, C looked promising — it separated by 2.1× and caught
+`spoof_phone` for free. The daylight attack recording, made specifically to test it, killed
+it: **C reads 0.0781 for the attack against 0.0966 for the honest daylight capture and a
+live range of 0.056–0.143.** The attack sits *inside* the live distribution, and below the
+honest capture.
+
+It is not one statistic that fails. Three rank the daylight attack as **more live-looking
+than a live face**:
+
+```text
+                      honest daylight   floodlight in daylight   ranks the attack as
+old OFF/ON ratio               0.7389                   0.4907   cleaner
+candidate C                    0.0966                   0.0781   cleaner
+face-box SNR                    881.7                   1017.3   stronger
+```
+
+YuNet also detects a face in the daylight attack (it does not in the nocturnal one), so
+detection does not save it either.
+
+### Why, and what actually follows
+
+The emitter's contribution is what carries every one of these statistics. In high ambient
+NIR the ambient already dominates, so *adding* a floodlight changes the picture much less
+than it does in the dark — and the honest capture and the attacked one converge. There is
+no cleverer arrangement of these terms that recovers a separation which is not in the
+signal.
+
+### The matched pair (2026-08-08) — separation is dead at ambient 14
+
+The cleanest experiment in the corpus, and the one that should be quoted: same room, same
+subject, same position, 90 seconds apart, ambient floors within 1% of each other. One live,
+one with an IR remote at the sensor.
+
+```text
+                        floor   old ratio     cand A   cand B   cand C   whole SNR   face SNR
+live_room_lit           13.91      0.3352     0.1031   0.0269   0.2374       280.5     1535.1
+attack_floodlight_room  14.05      0.2523     0.0737   0.0297   0.1071       948.6     2898.1
+```
+
+**Every statistic ranks the attack as more live-looking than the live face**, or (candidate
+B, 1.1×) fails to separate at all. Earlier evidence for this came from captures at
+*different* ambient levels and was open to the objection that the conditions differed. This
+pair closes that objection.
+
+The room in question is a large one whose only sunlight source is indirect and about 10 m
+away, and the operator reports Windows Hello authenticating there reliably. Two things
+follow, and they should not be conflated:
+
+- **Refusing there is correct for this hardware.** At floor 14 there is no measurable
+  difference between an attacked capture and an honest one, so any answer other than
+  "cannot verify" would be a guess.
+- **It is a hardware gap, not a logic gap.** A 940 nm emitter behind a narrow bandpass
+  filter — which is what purpose-built face-auth optics use — would see a far lower ambient
+  floor in the *same* room, because 940 nm sits inside a solar water-vapour absorption band.
+  Windows Hello working there is evidence about its optics, not evidence that strobe
+  liveness is recoverable on this sensor.
+
+**Scope consequence.** The ceiling is now bracketed between 0.92 and 13.91 rather than 0.92
+and 20.33 — but no placement of the gate inside that bracket recovers a room reading 13.91.
+On this hardware Faciolock is a **low-ambient system**: evening, artificial light, curtains
+drawn. Daytime rooms with a real window are outside it. That belongs in
+[01](01-goals-and-scope.md) as an explicit non-goal, not buried here.
+
+### Resolved by an environment gate (2026-08-06)
+
+`Config::ambient_floor_max = 0.04`, checked in `Burst::from_frames` **before tier
+conformance, liveness or detection**, yielding `BurstError::AmbientTooBright` →
+`Verdict::Environment { ambient_floor }` → `Unavailable` on the wire → password prompt.
+
+Three properties it was built to have:
+
+1. **It gates on the ambient floor, not on a ratio or an SNR.** The floor is the only
+   candidate an attacker can move in one direction only: raising ambient raises the floor,
+   which *closes* the gate. A gate keyed on emitter-to-ambient ratio or SNR puts an
+   attacker-raisable term where it would hold the gate **open** — the synchronised-injection
+   case B9 never covered.
+2. **It runs before any biometric work.** No face is looked for on a gated capture. This is
+   not only cheap, it is what keeps Phase 4's rate-limiter exemption from becoming a free
+   probing oracle.
+3. **It is exempt from the failure budget.** `Verdict::counts_as_an_attempt()` returns false
+   for `Environment`, so weather cannot disable face unlock. `Match` / `NoMatch` /
+   `NotLive` / `NoFace` still count; the match is exhaustive so a new variant must be
+   classified deliberately.
+
+**0.04 is derived, not picked.** It is where `dark_ratio_max` stops working:
+`mean(OFF)/mean(ON) ≈ F/(F+A)`, so that check holds only while `F < A/999`; the weakest
+live amplitude measured is 48, giving `F < 0.048`. The gate sits just under the break-even
+rather than on it, and a test pins the *relationship* so re-tuning either keeps them
+consistent. It clears the noisiest measured dark capture (0.0020) by 20×.
+
+**Accepted cost:** half-closed blinds (floor 0.92) are gated out. No working case is lost —
+`dark_ratio_max` already rejected that capture at 0.026 against its 1e-3 — but a confusing
+biometric failure becomes an honest "too bright to verify".
+
+**Still open:** no attack recording exists between 0.92 and 20.33, so the level at which
+attack/live separation actually dies is bracketed, not located. The ambient sweep closes
+that, and until it does the gate is placed by the dark-check derivation rather than by
+measured separation.
+
+---
+
+The reasoning that led there. The ambient pedestal is the one quantity that separates
+cleanly and by an unbounded margin:
+
+```text
+nocturnal (7 captures, incl. blinds-closed midday)   0.00
+daylight  (3 captures)                        20.33 – 51.74
+```
+
+Above an ambient level, this hardware **cannot verify liveness at all** and must say so:
+fail closed, fall back to password, and report it as an *environment* outcome rather than a
+failed attempt — so Phase 4's rate limiter and lockout do not punish the user for the
+weather. That verdict category has to exist before Phase 3 freezes the IPC contract.
+
+Below that level, the difference-domain checks work with their nocturnal margins intact.
+Where exactly the gate sits is unmeasured: it needs the ambient sweep, because the corpus
+currently holds only "dark" and "blinds open" and nothing in between.
+
+### What survives, and what must be requalified
+
+- **[B9](#b9)'s conjunctive rule stands.** It is the constraint that ruled out the
+  otherwise-obvious burst-level fix.
+- **P1-e stands, and was never at issue.** Tier is a hardware property; this hardware
+  strobes 24/7. The sun did not change the tier, it broke the observation beneath it.
+  Wash-out still yields a reject, never a downgrade.
+- **`Tier::IrConstant` is uninstantiable** in the current code and was before this bug: on
+  the non-strobe path `classify` marks every frame `On`, `build_pairs` needs an On/Off
+  adjacency, so it always returns zero pairs and `min_pairs >= 2` always fails. "Downgrade
+  to `ir-constant`" is not a behaviour that exists.
+- **The loud floodlight case lost a layer.** The neighbour-relative phase assignment
+  correctly labels a bright contaminant as the OFF frame it is, so a burst that used to be
+  refused as a tier mismatch now forms and is refused by the dark-frame check instead —
+  rejected by the check built for it, naming itself in the verdict, but at one layer rather
+  than two. That makes `dark_ratio_max` load-bearing alone for that case, which is a second
+  reason its replacement cannot be rushed.
+- **Detection is unaffected.** YuNet finds the face in daylight, and finds nothing in the
+  empty room, the floodlight attack, or the phone spoof, exactly as before.
+
+### The lesson
+
+Every statistic in this project was chosen to be a ratio, deliberately and for a good
+reason: [10/Probe 3b](10-hardware-probe.md#probe-3b--repeat-run-24-hours-later) found the
+OFF floor moving tenfold between runs and concluded "never threshold on absolute
+brightness". That conclusion was right and the inference from it was too narrow. **A ratio
+is invariant to gain and a difference is invariant to offset, and ambient light is an
+offset.** Choosing between them requires knowing which nuisance parameter you are actually
+exposed to — and the corpus could not answer that, because it held one lighting condition
+and did not say so.
+
+The corpus is the project's evidence, and a corpus that is uniform in a variable nobody
+recorded cannot reveal that the variable matters. `record.sh` now records ambient
+conditions and local time ([B19](#b19)).
 
 ---
 

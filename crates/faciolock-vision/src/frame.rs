@@ -198,8 +198,15 @@ pub enum Observed {
 }
 
 /// Why a capture could not become a burst worth authenticating against.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// No `Eq`: [`BurstError::AmbientTooBright`] carries the measured floor, and the audit log
+/// in Phase 4 wants the number rather than just the fact.
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum BurstError {
+    /// Ambient near-infrared is high enough that the emitter no longer carries the signal
+    /// every liveness check depends on. **Not a failed authentication** — the capture was
+    /// never measurable. See [`Config::ambient_floor_max`](crate::Config).
+    AmbientTooBright { floor: f32 },
     /// Not enough frames survived AGC discard to look for pairs in.
     TooFewFrames { got: usize },
     /// Frames disagree on geometry, or a frame is not `width * height` bytes.
@@ -236,6 +243,19 @@ impl<'a> Burst<'a> {
         }
 
         let means: Vec<f64> = usable.iter().map(|f| f.mean()).collect();
+
+        // **The ambient gate, and it comes first on purpose.**
+        //
+        // Before tier conformance, before liveness, before detection — so that nothing
+        // biometric runs on a capture this hardware cannot measure, and so that a bright
+        // room reports itself as bright rather than as a tier mismatch. An `Environment`
+        // outcome that had already detected a face would also make the rate-limiter
+        // exemption in Phase 4 into a free probing oracle.
+        let floor = means.iter().cloned().fold(f64::INFINITY, f64::min);
+        if floor > cfg.ambient_floor_max {
+            return Err(BurstError::AmbientTooBright { floor: floor as f32 });
+        }
+
         let (phases, observed) = classify(&means);
 
         // The configured tier is what this hardware was enrolled as. A capture that does
@@ -290,42 +310,132 @@ impl<'a> Burst<'a> {
     }
 }
 
+/// How far the emitter's contribution must sit above the same-phase noise floor before a
+/// capture is called a strobe.
+///
+/// **Not a security boundary.** This answers "is this hardware doing what it was enrolled
+/// as", not "is this an attack" — a floodlight attack is *also* mounted against strobing
+/// hardware and reads as `Strobing` here, correctly. Rejecting it is liveness' job.
+///
+/// So the bar is set for confidence that an emitter exists at all, and every capture the
+/// project has clears it by a wide margin:
+///
+/// ```text
+/// live, nocturnal (5 captures)      931 – 15,461
+/// live, daylight  (1 capture)             549
+/// floodlight attack, nocturnal             53   <- still strobing hardware, correctly
+/// ```
+///
+/// 10 is ~5x below the weakest thing measured. A continuous source bright enough to drive
+/// the emitter under it fails this and is rejected as `TierMismatch`, which is fail-closed
+/// and is P1-e working as intended.
+const STROBE_SNR_MIN: f64 = 10.0;
+
+/// Fraction of steps that must reverse direction.
+///
+/// Every capture the project has reads exactly 1.000 — including the daylight ones, which
+/// is the measurement that showed the emitter never stopped strobing. Carried at 0.9 to
+/// tolerate a dropped frame, matching the pre-B18 `flips >= 90%` rule it replaces.
+const STROBE_REGULARITY_MIN: f64 = 0.9;
+
 /// Split frames into ON and OFF by mean luma, and judge what pattern they form.
 ///
-/// The split point is the midpoint between the dimmest and brightest frame. On strobing
-/// hardware the two populations sit four to five orders of magnitude apart, so where
-/// exactly the cut falls between them cannot matter. What matters is recognising when
-/// there is no separation at all — that is the constant and dark cases, which is why the
-/// spread is checked before anything is split.
+/// **This measures a difference, not a ratio, and that is [B18]'s fix.**
+///
+/// The original asked whether the brightest frame was 10x the dimmest. On this hardware
+/// that is 15,000:1 after dark and 1.15:1 in daylight, with the emitter firing every single
+/// frame in both cases — because ambient near-infrared adds a pedestal to *both* phases and
+/// a ratio saturates against a pedestal. Every corpus recording had been made at night and
+/// nothing recorded that fact, so the whole corpus described one lighting condition without
+/// saying so:
+///
+/// ```text
+///                        ambient floor   amplitude   same-phase noise      SNR   ratio test
+/// live, nocturnal              0.0002        54–81        0.005–0.047    1,525+   Strobing
+/// live, daylight                51.74        32.99              0.060       549   Constant  <-
+/// ```
+///
+/// The emitter's contribution (`amplitude`) barely moved; only its *proportion* did. So the
+/// statistic is the median step between neighbouring frames, divided by the median step
+/// between frames of the same phase — a noise floor measured on the capture itself, since
+/// wiki/10 Probe 3b showed that floor move tenfold between two runs on one machine.
+/// Subtracting a constant from every frame changes neither term.
+///
+/// [B18]: ../../../wiki/11-bug-log.md
 pub fn classify(means: &[f64]) -> (Vec<Phase>, Observed) {
-    if means.is_empty() {
-        return (Vec::new(), Observed::Irregular);
+    if means.len() < 3 {
+        // Three frames is the minimum that contains a same-phase pair, and the noise floor
+        // below is measured from those. Fewer is not a weak measurement, it is no
+        // measurement -- and an unmeasurable capture must not be able to pass for a strobe.
+        return (means.iter().map(|_| Phase::On).collect(), Observed::Irregular);
     }
 
-    let lo = means.iter().cloned().fold(f64::INFINITY, f64::min);
     let hi = means.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let steps: Vec<f64> = means.windows(2).map(|w| w[1] - w[0]).collect();
 
-    // Require the bright population to be at least 10x the dark one before calling it a
-    // strobe. Less than that is AGC wobble on a constantly-lit sensor, not an emitter
-    // being switched.
-    if !(hi > lo * 10.0 && hi > 1.0) {
-        let observed = if hi < 1.0 { Observed::Dark } else { Observed::Constant };
+    // The emitter's contribution to the frame mean, and the floor it has to beat.
+    //
+    // `same_phase` skips a frame, so the emitter is in the *same* state at both ends and
+    // what remains is AGC drift, scene motion and read noise -- measured on this capture
+    // rather than assumed, because wiki/10 Probe 3b showed the floor move by an order of
+    // magnitude between two runs on the same machine.
+    let amplitude = median_abs(&steps);
+    let same_phase = median_abs(&means.windows(3).map(|w| w[2] - w[0]).collect::<Vec<_>>());
+    let snr = match (amplitude > 0.0, same_phase > 0.0) {
+        // A zero floor is a real reading on this hardware at night: two true dark frames
+        // are identical, so the emitter beat the noise by more than the capture can
+        // resolve.
+        (true, false) => f64::INFINITY,
+        (true, true) => amplitude / same_phase,
+        // No step between neighbouring frames at all. Nothing is alternating, and 0/0 must
+        // not read as "infinitely clean".
+        (false, _) => 0.0,
+    };
+
+    // A strobe reverses direction every frame. Drift, however steep, does not.
+    let reversals = steps.windows(2).filter(|w| w[0] * w[1] < 0.0).count();
+    let regularity = reversals as f64 / steps.len().saturating_sub(1).max(1) as f64;
+
+    if snr < STROBE_SNR_MIN || regularity < STROBE_REGULARITY_MIN {
+        // The three not-a-strobe answers, kept distinct because they mean different
+        // things to an operator: nothing is lit, something is lit but steady, or something
+        // is varying strongly without alternating.
+        let observed = if hi < 1.0 {
+            Observed::Dark
+        } else if snr < STROBE_SNR_MIN {
+            Observed::Constant
+        } else {
+            Observed::Irregular
+        };
         return (means.iter().map(|_| Phase::On).collect(), observed);
     }
 
-    let split = (lo + hi) / 2.0;
-    let phases: Vec<Phase> =
-        means.iter().map(|&m| if m > split { Phase::On } else { Phase::Off }).collect();
+    // Phase by comparison with immediate neighbours, **not** against a split of the global
+    // range. The global split is what the pre-B18 version used and it holds only while the
+    // capture's drift stays smaller than the emitter's amplitude. In daylight the ON series
+    // climbed 105 -> 116 while OFF climbed 92 -> 102, leaving 3.5 levels of headroom on a
+    // 14-level amplitude; a slightly longer capture would have put a late OFF frame above
+    // an early ON one and silently mislabelled both. Neighbours cannot drift apart, so this
+    // is immune to both drift and to any ambient pedestal.
+    let phases: Vec<Phase> = (0..means.len())
+        .map(|i| {
+            let reference = match (i.checked_sub(1), means.get(i + 1)) {
+                (Some(p), Some(&n)) => (means[p] + n) / 2.0,
+                (Some(p), None) => means[p],
+                (None, Some(&n)) => n,
+                (None, None) => return Phase::On,
+            };
+            if means[i] > reference { Phase::On } else { Phase::Off }
+        })
+        .collect();
 
-    // A strobe alternates every frame. Count how often it actually does.
-    let flips = phases.windows(2).filter(|w| w[0] != w[1]).count();
-    let observed = if flips >= phases.len().saturating_sub(1) * 9 / 10 {
-        Observed::Strobing
-    } else {
-        Observed::Irregular
-    };
+    (phases, Observed::Strobing)
+}
 
-    (phases, observed)
+fn median_abs(v: &[f64]) -> f64 {
+    let mut s: Vec<f64> = v.iter().map(|x| x.abs()).collect();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    if s.is_empty() { 0.0 } else { s[s.len() / 2] }
 }
 
 /// Pair each ON frame with an adjacent OFF frame, using no frame twice.
@@ -350,7 +460,7 @@ fn build_pairs<'a>(frames: &[Frame<'a>], phases: &[Phase]) -> Vec<Pair<'a>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{blank, domed, flat, H, W};
+    use crate::testing::{blank, domed, flat, strobe, H, W};
 
     fn cfg() -> Config {
         Config { agc_settle_frames: 0, ..Config::default() }
@@ -424,31 +534,101 @@ mod tests {
     /// weaker checks a constant-illumination tier would run. An attacker with a bright
     /// enough continuous IR source can *produce* a constant capture at will, so treating
     /// that as a hint would hand them the tier they can pass.
+    fn constant_capture(level: u8) -> Vec<u8> {
+        blank(W, H, level)
+    }
+
+    /// The tier-downgrade guard, and it now has two layers.
+    ///
+    /// **The gate answers first, and that is the better answer.** A capture that is
+    /// uniformly lit at level 60 *is* a bright room — the ambient floor equals the frame
+    /// mean — so reporting "too bright to verify" is more accurate than "wrong illumination
+    /// pattern". Before [B18] the only available answer was the latter.
+    ///
+    /// What must not change is the property underneath: an attacker with a continuous IR
+    /// source can produce a non-strobing capture at will, and no arrangement of that
+    /// capture may ever yield a `Burst` on hardware enrolled as strobing. Both layers
+    /// refuse; neither downgrades.
+    ///
+    /// [B18]: ../../../wiki/11-bug-log.md
     #[test]
     fn constant_illumination_is_rejected_not_downgraded() {
-        let px = blank(W, H, 60);
+        let px = constant_capture(60);
         let frames: Vec<Frame<'_>> = (0..20).map(|_| Frame::new(&px, W, H).unwrap()).collect();
         match Burst::from_frames(&frames, &cfg()) {
-            Err(BurstError::TierMismatch { configured: Tier::IrStrobe, observed }) => {
-                assert_eq!(observed, Observed::Constant);
+            Err(BurstError::AmbientTooBright { floor }) => {
+                assert!((floor - 60.0).abs() < 0.5, "floor {floor} should be the frame mean");
             }
-            other => panic!("expected a tier mismatch, got {:?}", other.map(|_| "a burst")),
+            other => panic!("expected the ambient gate, got {:?}", other.map(|_| "a burst")),
         }
+    }
+
+    /// The same property stated as a property: across the whole brightness range an
+    /// attacker could produce, a constant capture never becomes a burst. Which layer
+    /// catches it is an implementation detail; that one of them always does is not.
+    #[test]
+    fn no_constant_capture_ever_yields_a_burst() {
+        for level in [0u8, 1, 5, 30, 60, 120, 200, 255] {
+            let px = constant_capture(level);
+            let frames: Vec<Frame<'_>> = (0..20).map(|_| Frame::new(&px, W, H).unwrap()).collect();
+            assert!(
+                Burst::from_frames(&frames, &cfg()).is_err(),
+                "constant illumination at {level} produced a burst"
+            );
+        }
+    }
+
+    /// And the gate itself: it fires on the ambient floor, so a capture that is dark on
+    /// its OFF frames still passes however bright its ON frames are. Otherwise a strong
+    /// emitter would gate itself out.
+    #[test]
+    fn the_gate_measures_the_floor_and_not_the_peak() {
+        let on = domed(W, H, 200, 150); // a very bright ON frame
+        let off = blank(W, H, 0);
+        let bytes = strobe(&on, &off, 4);
+        assert!(
+            Burst::from_planar(&bytes, W, H, &cfg()).is_ok(),
+            "a bright emitter over a dark room must not trip the ambient gate"
+        );
     }
 
     /// Conjunction over an empty set is true, so a burst with no pairs would satisfy
     /// every liveness check that was meant to inspect it. It has to fail here instead.
+    ///
+    /// Three frames, not two: since [B18] the noise floor is measured from same-phase
+    /// pairs, and two frames contain none, so a two-frame capture is now unclassifiable
+    /// rather than thinly classifiable. `ON, OFF, ON` is the shortest capture that both
+    /// classifies as a strobe and yields fewer pairs than the floor.
+    ///
+    /// [B18]: ../../../wiki/11-bug-log.md
     #[test]
     fn a_burst_with_too_few_pairs_is_an_error_not_an_empty_pass() {
         let on = domed(W, H, 60, 10);
         let off = blank(W, H, 0);
-        // Two frames make exactly one pair; the floor is two.
-        let frames =
-            vec![Frame::new(&on, W, H).unwrap(), Frame::new(&off, W, H).unwrap()];
+        let frames = vec![
+            Frame::new(&on, W, H).unwrap(),
+            Frame::new(&off, W, H).unwrap(),
+            Frame::new(&on, W, H).unwrap(),
+        ];
         assert!(matches!(
             Burst::from_frames(&frames, &cfg()),
             Err(BurstError::TooFewPairs { got: 1, need: 2 })
         ));
+    }
+
+    /// And the shorter capture is refused too — earlier, and for a reason that names the
+    /// real problem. A capture too short to measure its own noise floor must not be able
+    /// to pass for a strobe, or "unmeasurable" becomes a way through.
+    #[test]
+    fn a_capture_too_short_to_measure_is_not_a_strobe() {
+        let on = domed(W, H, 60, 10);
+        let off = blank(W, H, 0);
+        let frames = vec![Frame::new(&on, W, H).unwrap(), Frame::new(&off, W, H).unwrap()];
+        assert!(matches!(
+            Burst::from_frames(&frames, &cfg()),
+            Err(BurstError::TierMismatch { observed: Observed::Irregular, .. })
+        ));
+        assert_eq!(classify(&[60.0, 0.0]).1, Observed::Irregular);
     }
 
     #[test]

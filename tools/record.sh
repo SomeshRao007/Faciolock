@@ -4,11 +4,11 @@
 # Phase 0 tool. ffmpeg does the capture; this only resolves the device, names the
 # output, and records the conditions so a file is still self-describing in a month.
 #
-# Usage:  tools/record.sh <label> [frames] [note]
+# Usage:  tools/record.sh <label> [frames] [note] [ambient]
 # e.g.    tools/record.sh live_lit_frontal
-#         tools/record.sh spoof_print_matte 90 "glossy 6x4, held at 40cm"
+#         tools/record.sh spoof_print_matte 90 "glossy 6x4, held at 40cm" "night, lamp"
 #
-# ponytail: no argument parser, no --flags. Three positionals is the whole interface.
+# ponytail: no argument parser, no --flags. Four positionals is the whole interface.
 
 set -euo pipefail
 
@@ -20,11 +20,17 @@ FPS=30
 PIXFMT=gray          # V4L2 'GREY' / Y800, the only format the IR camera offers
 
 label="${1:-}"
-frames="${2:-90}"    # 90 @ 30fps = 3s = ~45 ON/OFF pairs, minus AGC settling
+frames="${2:-90}"    # 90 frames; how long that takes is measured, not assumed -- see below
 note="${3:-}"
 
+# Ambient lighting. Recorded because on 2026-08-06 it turned out to be the variable that
+# decides whether this hardware's emitter strobe is visible at all: every capture before
+# that date was made after dark, nothing recorded that fact, and the whole corpus turned
+# out to describe one lighting condition without saying so. wiki/11 B18.
+ambient="${4:-}"
+
 if [[ -z "$label" ]]; then
-    echo "usage: $0 <label> [frames] [note]" >&2
+    echo "usage: $0 <label> [frames] [note] [ambient]" >&2
     echo "  label must match [a-z0-9_]+  e.g. live_lit_frontal, spoof_print_matte" >&2
     exit 2
 fi
@@ -76,10 +82,15 @@ mkdir -p "$CORPUS_DIR"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 base="${CORPUS_DIR}/${label}_${stamp}"
 
+if [[ -z "$ambient" ]]; then
+    echo "warning: no ambient description given -- pass a 4th argument, e.g. 'daylight, blinds open'" >&2
+fi
+
 echo "device : $device"
 echo "         -> $resolved"
-echo "format : ${PIXFMT} ${WIDTH}x${HEIGHT} @ ${FPS}fps"
-echo "frames : ${frames} (~$(( frames / FPS ))s, ~$(( frames / 2 )) ON/OFF pairs)"
+echo "format : ${PIXFMT} ${WIDTH}x${HEIGHT} @ ${FPS}fps requested"
+echo "frames : ${frames}"
+echo "ambient: ${ambient:-(unrecorded)}"
 echo "output : ${base}.gray"
 echo
 echo "Get into position. Recording starts in 3s..."
@@ -96,11 +107,15 @@ echo "RECORDING"
 #
 # The signalstats probe in wiki/10 never hit this because -f null encodes nothing and
 # so does no frame-rate conversion. Any capture written to disk needs this flag.
+started=$(date +%s.%N)
+
 ffmpeg -hide_banner -loglevel error \
     -f v4l2 -input_format "$PIXFMT" -video_size "${WIDTH}x${HEIGHT}" -framerate "$FPS" \
     -i "$device" \
     -frames:v "$frames" -fps_mode passthrough -f rawvideo -pix_fmt "$PIXFMT" \
     "${base}.gray"
+
+elapsed=$(echo "$(date +%s.%N) - $started" | bc)
 
 echo "done"
 
@@ -118,16 +133,29 @@ if (( size % frame_bytes != 0 )); then
     echo "warning: ${size} bytes is not a whole number of ${frame_bytes}-byte frames" >&2
 fi
 
+# fps_delivered, not fps.
+#
+# The old sidecar recorded "fps": 30 -- the value this script *asked for*, written as
+# though it were an observation. It is not: the sensor delivered 14.7 fps on 2026-08-06,
+# and `VIDIOC_G_PARM` reports the configured rate too, so nothing in the project had ever
+# measured the real one. Same shape as B4: a capture that misdescribes itself is worse
+# than one that says nothing, because the wrong number gets quoted. wiki/11 B19.
+fps_delivered=$(echo "scale=2; ${actual} / ${elapsed}" | bc)
+
 cat > "${base}.json" <<EOF
 {
   "label": "${label}",
   "recorded_utc": "${stamp}",
+  "recorded_local": "$(date +%Y-%m-%dT%H:%M:%S%z)",
+  "ambient": "${ambient}",
   "device_bypath": "${device}",
   "device_resolved": "${resolved}",
   "width": ${WIDTH},
   "height": ${HEIGHT},
-  "fps": ${FPS},
   "pixel_format": "GREY",
+  "fps_requested": ${FPS},
+  "fps_delivered": ${fps_delivered},
+  "elapsed_s": ${elapsed},
   "frames_requested": ${frames},
   "frames_actual": ${actual},
   "bytes": ${size},
@@ -135,4 +163,4 @@ cat > "${base}.json" <<EOF
 }
 EOF
 
-echo "wrote  ${base}.json  (${actual} frames, $(( size / 1024 / 1024 )) MB)"
+echo "wrote  ${base}.json  (${actual} frames, $(( size / 1024 / 1024 )) MB, ${fps_delivered} fps delivered)"

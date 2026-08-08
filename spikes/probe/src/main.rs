@@ -299,6 +299,7 @@ struct Capture {
     tier: Tier,
     roi: Roi,
     pairs: Vec<Pair>,
+    alternation: Option<Alternation>,
 }
 
 impl Capture {
@@ -328,6 +329,11 @@ impl Capture {
         let roi = Roi::centred(width, height, ROI_FRACTION);
         let pairs = build_pairs(&frames[usable..], &phases, width, &roi);
 
+        // Deliberately computed from the same post-AGC means the ratio test saw, so the
+        // two views are answering the same question about the same data and any
+        // disagreement between them is a real disagreement.
+        let alternation = alternation(&frame_means[usable..]);
+
         Ok(Capture {
             width,
             height,
@@ -337,6 +343,7 @@ impl Capture {
             tier,
             roi,
             pairs,
+            alternation,
         })
     }
 
@@ -382,11 +389,23 @@ impl Capture {
             let _ = writeln!(s);
         }
 
+        if let Some(a) = self.alternation {
+            let _ = writeln!(s, "\n-- alternation, difference domain (whole frame) --");
+            let _ = writeln!(s, "{:>18}  {:>12.4}", "ambient pedestal", a.pedestal);
+            let _ = writeln!(s, "{:>18}  {:>12.4}", "amplitude", a.amplitude);
+            let _ = writeln!(s, "{:>18}  {:>12.4}", "same-phase noise", a.same_phase);
+            let _ = writeln!(s, "{:>18}  {:>12.1}", "SNR", a.snr);
+            let _ = writeln!(s, "{:>18}  {:>12.3}", "sign regularity", a.sign_regularity);
+            let _ = writeln!(s, "{:>18}  {:>12.4}", "modulation", a.modulation);
+        }
+
         if self.pairs.is_empty() {
             let _ = writeln!(
                 s,
-                "\nNo ON/OFF pairs found. The strobe-difference tests need alternating\n\
-                 frames; on this capture there are none. Nothing further to measure."
+                "\nNo ON/OFF pairs found: the *ratio* test above did not see a strobe, so\n\
+                 nothing was split into phases. Read the difference-domain block instead --\n\
+                 a high SNR with sign regularity near 1.0 means the emitter is alternating\n\
+                 perfectly well and only the ratio statistic failed to notice. wiki/11 B18."
             );
             return s;
         }
@@ -526,6 +545,73 @@ fn classify(means: &[f64]) -> (Vec<Phase>, Tier) {
     };
 
     (phases, tier)
+}
+
+/// The strobe seen as a *difference* rather than a *ratio*.
+///
+/// Added 2026-08-06, because the ratio view failed. `classify` above asks whether the
+/// brightest frame is 10x the dimmest, which is 15,000:1 at night and 1.15:1 in daylight
+/// on the same hardware with the same emitter firing every single frame. Ambient NIR adds
+/// a pedestal to both phases and a ratio saturates against a pedestal; a difference does
+/// not. wiki/11 B18.
+///
+/// Nothing here is thresholded. It reports the quantities a threshold would have to be
+/// chosen from, which is this tool's whole job.
+#[derive(Clone, Copy)]
+struct Alternation {
+    /// Median |m[i+1] - m[i]|. The emitter's contribution to the frame mean.
+    amplitude: f64,
+    /// Median |m[i+2] - m[i]| -- consecutive frames of the *same* phase, so the emitter
+    /// contributes nothing and what is left is AGC drift, scene motion and read noise.
+    /// This is the noise floor the emitter has to beat, measured on the same capture
+    /// rather than assumed.
+    same_phase: f64,
+    /// amplitude / same_phase. Dimensionless, and unlike the ratio it does not care what
+    /// the ambient pedestal is.
+    snr: f64,
+    /// Fraction of steps where the difference reverses sign. A strobe alternates every
+    /// frame, so a real one sits at ~1.0. Distinguishes an emitter from a scene that
+    /// merely got brighter.
+    sign_regularity: f64,
+    /// Dimmest frame mean: the ambient floor the emitter is riding on.
+    pedestal: f64,
+    /// amplitude / mean. What fraction of the signal the emitter accounts for -- the
+    /// quantity that collapsed in daylight even though `amplitude` did not.
+    modulation: f64,
+}
+
+fn alternation(means: &[f64]) -> Option<Alternation> {
+    if means.len() < 3 {
+        return None;
+    }
+
+    let steps: Vec<f64> = means.windows(2).map(|w| w[1] - w[0]).collect();
+    let mut mags: Vec<f64> = steps.iter().map(|d| d.abs()).collect();
+
+    // Same-phase pairs skip a frame, so the emitter state is identical at both ends.
+    let mut same: Vec<f64> = means.windows(3).map(|w| (w[2] - w[0]).abs()).collect();
+
+    mags.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    same.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let amplitude = percentile(&mags, 0.50);
+    let same_phase = percentile(&same, 0.50);
+    let flips = steps.windows(2).filter(|w| w[0] * w[1] < 0.0).count();
+    let pedestal = means.iter().cloned().fold(f64::INFINITY, f64::min);
+    let overall = mean(means);
+
+    Some(Alternation {
+        amplitude,
+        same_phase,
+        // A same-phase floor of exactly zero is a real reading on this hardware at night:
+        // two true dark frames are identical. Report it as unbounded rather than dividing
+        // by zero, which is honest -- the emitter beat the noise by more than the capture
+        // can resolve.
+        snr: if same_phase > 0.0 { amplitude / same_phase } else { f64::INFINITY },
+        sign_regularity: flips as f64 / steps.len().saturating_sub(1).max(1) as f64,
+        pedestal,
+        modulation: if overall.abs() > f64::EPSILON { amplitude / overall } else { 0.0 },
+    })
 }
 
 /// Pair each ON frame with an adjacent OFF frame and measure the pair.
@@ -731,6 +817,51 @@ mod tests {
         assert_eq!(tier, Tier::IrStrobe);
         assert_eq!(phases[0], Phase::On);
         assert_eq!(phases[1], Phase::Off);
+    }
+
+    /// The property the whole difference-domain view exists for: adding an ambient
+    /// pedestal to *both* phases must not change the measured strobe at all.
+    ///
+    /// This is the daylight case reduced to arithmetic. The ratio test calls the first
+    /// series a strobe and the second constant illumination; the emitter is identical in
+    /// both. If this test ever fails, the new statistic has picked up the old one's bug.
+    #[test]
+    fn alternation_is_invariant_to_an_ambient_pedestal() {
+        let night: Vec<f64> = (0..30).map(|i| if i % 2 == 0 { 14.004 } else { 0.004 }).collect();
+        let daylight: Vec<f64> = night.iter().map(|m| m + 93.0).collect();
+
+        let n = alternation(&night).expect("enough frames");
+        let d = alternation(&daylight).expect("enough frames");
+
+        assert!((n.amplitude - d.amplitude).abs() < 1e-9, "{} vs {}", n.amplitude, d.amplitude);
+        assert!((n.sign_regularity - d.sign_regularity).abs() < 1e-9);
+        assert_eq!(n.snr, d.snr, "SNR must not depend on the ambient floor");
+
+        // And the ratio test disagrees with itself across exactly this pair, which is the
+        // bug being worked around.
+        assert_eq!(classify(&night).1, Tier::IrStrobe);
+        assert_eq!(classify(&daylight).1, Tier::IrConstant);
+    }
+
+    /// Modulation *should* collapse under a pedestal -- it is the fraction of the signal
+    /// the emitter accounts for. Reported precisely so the two are not confused: it is the
+    /// quantity that legitimately got worse, while amplitude and SNR did not.
+    #[test]
+    fn modulation_collapses_under_a_pedestal_even_though_snr_does_not() {
+        let night: Vec<f64> = (0..30).map(|i| if i % 2 == 0 { 14.0 } else { 0.0 }).collect();
+        let daylight: Vec<f64> = night.iter().map(|m| m + 93.0).collect();
+        let n = alternation(&night).expect("enough frames");
+        let d = alternation(&daylight).expect("enough frames");
+        assert!(n.modulation > 10.0 * d.modulation, "{} vs {}", n.modulation, d.modulation);
+    }
+
+    /// A sensor that is merely drifting, with no emitter, must not look like a strobe:
+    /// its steps do not reverse sign.
+    #[test]
+    fn a_monotonic_drift_is_not_an_alternation() {
+        let drifting: Vec<f64> = (0..30).map(|i| 100.0 - i as f64 * 0.4).collect();
+        let a = alternation(&drifting).expect("enough frames");
+        assert!(a.sign_regularity < 0.1, "drift read as alternating: {}", a.sign_regularity);
     }
 
     #[test]

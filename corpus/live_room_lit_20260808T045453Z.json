@@ -1,0 +1,18 @@
+{
+  "label": "live_room_lit",
+  "recorded_utc": "20260808T045453Z",
+  "recorded_local": "2026-08-08T10:25:03+0530",
+  "ambient": "indoor, large room, daylight + lights",
+  "device_bypath": "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:7:1.2-video-index0",
+  "device_resolved": "/dev/video2",
+  "width": 640,
+  "height": 360,
+  "pixel_format": "GREY",
+  "fps_requested": 30,
+  "fps_delivered": 12.17,
+  "elapsed_s": 7.390952025,
+  "frames_requested": 90,
+  "frames_actual": 90,
+  "bytes": 20736000,
+  "note": "frontal, ~40cm, big room good light, Windows Hello works here"
+}

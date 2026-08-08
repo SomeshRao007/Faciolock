@@ -74,10 +74,21 @@ CI runs it with no camera attached.
 - `faciolockd` skeleton, config loading, model SHA256 verification at startup
 - Graceful handling of camera-busy (video call in progress) — reply fast, don't fight
 
-**Exit:** `faciolockd` answers a hand-rolled socket request with a real verdict from
-the real camera, in under 400 ms warm. **Plus: the real frame-burst cost measured** —
-[06](06-performance-budget.md) assumes 130 ms and only 82 ms of headroom sits behind
-that estimate.
+**Exit — restated 2026-08-06, because the original is unmeetable and saying so now is
+cheaper than missing it later.** The delivered frame rate is 12–15 fps, so a 6-frame burst
+alone spends ~340–410 ms of a 400 ms budget ([B19](11-bug-log.md#b19)), and the warm path
+has read ~399 ms against that target since Phase 1 — the "82 ms of headroom" this section
+used to quote predates 2-of-3 matching and the 320×320 detector.
+
+1. Frame-burst cost measured in **both ambient regimes**, from kernel timestamps, p50/p95/p99.
+2. Correct verdict on real hardware in both regimes — which is blocked on
+   [B18](11-bug-log.md#b18), since honest daylight captures currently cannot authenticate.
+3. [06](06-performance-budget.md) restated from the measured delivery rate.
+4. `faciolockd` answers a hand-rolled socket request with a real verdict from the real camera.
+
+If the burst cost is confirmed at ~340 ms, the latency conversation moves to **overlapping
+capture with compute** — SFace's 230 ms can hide inside the capture window — which is a
+pipeline change and needs its own decision entry rather than a quiet re-open of Q2.
 
 ---
 
@@ -173,7 +184,8 @@ face *and* password entry still works instantly while the camera is running.
 | ~~EdgeFace weights not BSD-licensed~~ | 0 | **Materialised.** Weights are CC BY-NC-SA 4.0. SFace fallback taken as designed ([B10](11-bug-log.md#b10)). |
 | SFace training-data provenance also restricted | 0 | Unresolved. Upstream repo states no licence. Fallback is dlib's CC0 model. **Must clear before ITP.** |
 | Embedder is 53% of the latency budget | 1 | SFace is 85 ms under `tract`. Detector input size is the cheap lever; quantized models are **not** available under `tract`. |
-| **Frame burst is 130 ms estimated, never measured** | 2 | The weakest number in [06](06-performance-budget.md), and only 82 ms of headroom sits behind it. **Measure it as a Phase 2 exit condition.** If it blows the budget, `ort` is the fallback — comparison retained in [08/Q2](08-open-questions.md#q2--inference-runtime--decided-tract). |
+| ~~Frame burst is 130 ms estimated, never measured~~ | 2 | **Materialised, worse than forecast.** The delivered frame rate is **12–15 fps, not 30** — 30 was the advertised rate and nothing had measured the real one ([B19](11-bug-log.md#b19)). A 6-frame burst spans ~340–410 ms, which is the whole p95 target before any inference. And the 130 ms was impossible under its own assumption: 6 frames at 33.3 ms span ≥167 ms. The "82 ms of headroom" this row used to quote was itself stale — [06](06-performance-budget.md) has read ~399 ms against a 400 ms target since Phase 1. |
+| **Ambient IR breaks every ratio-domain statistic; all corpus data was nocturnal** | 2 | **Materialised.** [B18](11-bug-log.md#b18). `classify` fixed by moving to the difference domain; **`dark_ratio_max` still rejects 100% of honest daylight captures** and its replacement is blocked on a floodlight-in-daylight recording. Best candidate separates by 2.1× where the old check had 65×. |
 | TPM PCR choice breaks enrolment on firmware update | 4 | Conservative PCR set; documented re-enrol; non-TPM fallback always available. |
 | Reference machine is the only self-strobing hardware | 2 | `ir-constant` tier exists; needs testing on borrowed hardware before any claims. |
 | Rust crate packaging blocks the archive | 7+ | Known-slow, not blocking. PPA first regardless. |

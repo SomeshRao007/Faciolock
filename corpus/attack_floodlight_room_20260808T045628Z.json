@@ -1,0 +1,18 @@
+{
+  "label": "attack_floodlight_room",
+  "recorded_utc": "20260808T045628Z",
+  "recorded_local": "2026-08-08T10:26:39+0530",
+  "ambient": "indoor, large room, daylight + lights",
+  "device_bypath": "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:7:1.2-video-index0",
+  "device_resolved": "/dev/video2",
+  "width": 640,
+  "height": 360,
+  "pixel_format": "GREY",
+  "fps_requested": 30,
+  "fps_delivered": 12.18,
+  "elapsed_s": 7.385729758,
+  "frames_requested": 90,
+  "frames_actual": 90,
+  "bytes": 20736000,
+  "note": "IR remote at sensor, face in frame, same position"
+}

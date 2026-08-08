@@ -178,6 +178,7 @@ re-verifies the format and geometry on open regardless of what the config says.
 | Daemon hangs | client-side deadline → `PAM_AUTHINFO_UNAVAIL` |
 | Daemon crashes mid-request | socket EOF → `PAM_AUTHINFO_UNAVAIL` |
 | Camera busy (video call) | daemon replies `Unavailable` fast, doesn't fight for the device |
+| **Room too bright in NIR** | gate fires before any biometric work → `Environment` → `Unavailable`. **Not counted as a failed attempt** ([B18](11-bug-log.md#b18)) |
 | No enrolment | `NoEnrolment` → `PAM_USER_UNKNOWN`, no camera touched |
 | PAM module panics | `catch_unwind` → `PAM_AUTH_ERR` |
 

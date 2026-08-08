@@ -382,28 +382,35 @@ mod tests {
         );
     }
 
-    /// The louder half of the same attack, which never reaches liveness at all.
+    /// The louder half of the same attack.
     ///
-    /// A contaminant bright enough to rival the ON frame stops the capture looking like a
-    /// strobe, so the burst fails to conform to the configured tier and is refused before
-    /// a single check runs. Found by writing the test above with an unrealistically bright
-    /// contaminant and watching it reject for the wrong reason. Worth keeping: it means
-    /// the floodlight attack is caught at two independent layers, and the tier-conformance
-    /// layer is the one that holds when the attacker turns the power up.
+    /// **Which layer catches this changed at [B18], and the change is an improvement.**
+    /// Before, a contaminant bright enough to rival the ON frame pushed the glare frame
+    /// above `classify`'s *global* ON/OFF split, the alternation appeared to break, and the
+    /// burst was refused as a tier mismatch — rejected because the classifier had been
+    /// confused, not because anything detected an attack. B18 replaced that split with a
+    /// comparison against immediate neighbours, which labels the glare frame correctly as
+    /// the OFF frame it is. So the burst now forms, and the attack is rejected by the check
+    /// built to reject it, naming itself in the verdict.
+    ///
+    /// The cost is real and is recorded rather than glossed: this input used to be refused
+    /// at two independent layers and is now refused at one. That makes the dark-frame check
+    /// load-bearing on its own for the loud floodlight case, which is why replacing it
+    /// (wiki/11 B18's open item) cannot be done without re-running this test.
     #[test]
-    fn a_contaminant_bright_enough_to_break_alternation_never_reaches_liveness() {
+    fn a_bright_contaminant_is_rejected_by_the_check_built_for_it() {
         let on = domed(W, H, 60, 10); // mean ~41
         let dark = blank(W, H, 0);
-        let glare = blank(W, H, 30); // above the ON/OFF split, so it reads as an ON frame
+        let glare = blank(W, H, 30); // bright enough to rival the ON frame
         let bytes = strobe_one_contaminated(&on, &dark, &glare, 4, 2);
         let c = cfg();
-        assert!(
-            matches!(
-                Burst::from_planar(&bytes, W, H, &c),
-                Err(crate::frame::BurstError::TierMismatch { .. })
-            ),
-            "a capture that stops alternating is not a strobe capture"
-        );
+
+        let burst = Burst::from_planar(&bytes, W, H, &c)
+            .expect("neighbour-relative phase survives a bright contaminant");
+
+        let r = pre_box(&burst, &c).rejection().expect("the attack must still be rejected");
+        assert_eq!(r.check, Check::DarkFrame);
+        assert_eq!(r.failing_pairs, 1, "exactly one pair carried the glare");
     }
 
     #[test]

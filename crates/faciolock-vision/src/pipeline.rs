@@ -44,6 +44,19 @@ pub enum Verdict {
     NotLive { check: Check, worst: f64, threshold: f64 },
     /// Nobody was found in the frame.
     NoFace,
+    /// The room is too bright in near-infrared for this hardware to verify liveness.
+    ///
+    /// **Not a failed authentication, and Phase 4 must not count it as one.** Nothing was
+    /// rejected, because nothing was measured: the gate fires before detection, so no face
+    /// was ever looked for. Feeding this to the rate limiter would let the weather disable
+    /// face unlock, and exempting it *after* biometric work had run would turn the
+    /// exemption into a free probing oracle. See [`Config::ambient_floor_max`](crate::Config)
+    /// and [B18](../../../wiki/11-bug-log.md).
+    ///
+    /// On the wire this maps to `Unavailable` (wiki/04) — the same thing the caller already
+    /// gets when the camera is busy, and for the same reason: the daemon cannot answer the
+    /// question right now, so PAM falls through to the password prompt.
+    Environment { ambient_floor: f32 },
     /// The capture never became something worth measuring — wrong illumination pattern for
     /// the configured tier, or too few usable pairs.
     Unusable(BurstError),
@@ -65,8 +78,40 @@ impl Verdict {
             Verdict::NoMatch { .. }
             | Verdict::NotLive { .. }
             | Verdict::NoFace
+            | Verdict::Environment { .. }
             | Verdict::Unusable(_)
             | Verdict::Failed(_) => false,
+        }
+    }
+
+    /// Whether this outcome should count against the user's failure budget.
+    ///
+    /// Phase 4's rate limiter and lockout read this. An attempt that never got as far as
+    /// looking at a face is not evidence of anything, and counting it would mean sunshine
+    /// — or a camera in use by a video call — disabling face unlock until the user
+    /// authenticates by password.
+    ///
+    /// Exhaustive on purpose: a variant added later must be classified deliberately rather
+    /// than inheriting an exemption by being forgotten.
+    pub fn counts_as_an_attempt(&self) -> bool {
+        match self {
+            Verdict::Match { .. }
+            | Verdict::NoMatch { .. }
+            | Verdict::NotLive { .. }
+            | Verdict::NoFace => true,
+            // Nothing was measured, so nothing was attempted.
+            Verdict::Environment { .. } | Verdict::Unusable(_) | Verdict::Failed(_) => false,
+        }
+    }
+}
+
+impl From<BurstError> for Verdict {
+    /// The single place a burst failure becomes a verdict, so the ambient gate cannot be
+    /// mapped to a plain `Unusable` by a caller that forgot about it.
+    fn from(e: BurstError) -> Verdict {
+        match e {
+            BurstError::AmbientTooBright { floor } => Verdict::Environment { ambient_floor: floor },
+            other => Verdict::Unusable(other),
         }
     }
 }
@@ -273,7 +318,7 @@ pub fn verify_planar(
 ) -> Outcome {
     match Burst::from_planar(bytes, width, height, pipeline.config()) {
         Ok(b) => pipeline.verify(&b, template),
-        Err(e) => Outcome::deny(Verdict::Unusable(e), LivenessReport::default(), None),
+        Err(e) => Outcome::deny(e.into(), LivenessReport::default(), None),
     }
 }
 
@@ -288,11 +333,50 @@ mod tests {
             Verdict::NoMatch { best: 0.9 },
             Verdict::NotLive { check: Check::DarkFrame, worst: 1.0, threshold: 1e-3 },
             Verdict::NoFace,
+            Verdict::Environment { ambient_floor: 51.74 },
             Verdict::Unusable(BurstError::Malformed),
             Verdict::Failed("anything at all".into()),
         ] {
             assert!(!deny.is_allow(), "{deny:?} must not be an allow");
         }
+    }
+
+    /// A bright room must not be able to spend the user's failure budget, and a genuine
+    /// biometric rejection must still count. Getting this backwards either locks people
+    /// out for the weather or hands an attacker unlimited tries.
+    #[test]
+    fn only_outcomes_that_looked_at_a_face_count_as_attempts() {
+        for counted in [
+            Verdict::Match { similarity: 0.9, agreeing: 2 },
+            Verdict::NoMatch { best: 0.2 },
+            Verdict::NotLive { check: Check::DarkFrame, worst: 1.0, threshold: 1e-3 },
+            Verdict::NoFace,
+        ] {
+            assert!(counted.counts_as_an_attempt(), "{counted:?} must count");
+        }
+        for exempt in [
+            Verdict::Environment { ambient_floor: 51.74 },
+            Verdict::Unusable(BurstError::Malformed),
+            Verdict::Failed("camera vanished".into()),
+        ] {
+            assert!(!exempt.counts_as_an_attempt(), "{exempt:?} must not count");
+        }
+    }
+
+    /// The gate's whole value is that it is reported as its own thing. If it collapsed
+    /// into `Unusable` the audit log could not tell "too bright to measure" from "the
+    /// capture was malformed", and Phase 4 could not exempt one without the other.
+    #[test]
+    fn a_bright_room_becomes_environment_and_not_unusable() {
+        let v: Verdict = BurstError::AmbientTooBright { floor: 51.74 }.into();
+        match v {
+            Verdict::Environment { ambient_floor } => assert!((ambient_floor - 51.74).abs() < 1e-4),
+            other => panic!("expected Environment, got {other:?}"),
+        }
+        assert!(matches!(
+            Verdict::from(BurstError::Malformed),
+            Verdict::Unusable(BurstError::Malformed)
+        ));
     }
 
     /// A near-match is still a deny. The threshold is the boundary and nothing rounds up
