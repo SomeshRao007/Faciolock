@@ -84,3 +84,7 @@ yes.pub
 # Session logs and task trackers are working notes, not project documentation --
 # what they establish belongs in wiki/ and in the bug log, which are committed.
 .claude/
+
+# Python bytecode from the throwaway spikes.
+__pycache__/
+*.pyc
