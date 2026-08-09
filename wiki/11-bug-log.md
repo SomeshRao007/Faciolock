@@ -9,6 +9,7 @@ to fix.
 
 | # | Bug | Severity | Status |
 |---|---|---|---|
+| [B22](#b22) | The AGC settle frames were discarded **twice**, leaving 1 frame of 6 | **high** | fixed at the daemon's config seam; found by the first end-to-end run |
 | [B19](#b19) | Corpus sidecars recorded the **requested** frame rate as if it were measured | medium | fixed; delivered rate is 12–15 fps, never 30 |
 | [B18](#b18) | Every strobe statistic is a **ratio**, and ambient IR saturates a ratio | **critical** | `classify` fixed; ambient **gate** shipped; threshold provisional |
 | [B17](#b17) | Response test does **not** reject a screen — the statistic is whole-frame | **high** | design finding, open |
@@ -28,6 +29,228 @@ to fix.
 | [B3](#b3) | `2>/dev/null` hid a missing binary as "no evidence" | medium | documented |
 | [B2](#b2) | Half the `/dev/videoN` nodes are not cameras | low | fixed |
 | [B1](#b1) | Dead conditional in `build_pairs` | trivial | removed |
+
+---
+
+## B22 — The AGC settle frames were discarded twice {#b22}
+
+**Severity: high.** Every live authentication would have returned
+`Unusable(TooFewFrames { got: 1 })`. Not "sometimes", not "in daylight" — always, for
+everyone. It survived 119 passing tests and was found by the **first** end-to-end run
+against the real camera, which is the entire reason Phase 2's exit criterion 4 exists.
+
+### What happened
+
+Two layers each discard the frames the sensor produces while its AGC converges (wiki/10
+Probe 3), and neither knew about the other:
+
+```text
+faciolock-camera   Capture::start(warmup)              default 5, at stream open
+faciolock-vision   Config::agc_settle_frames           default 5, per burst
+```
+
+The daemon asked for a 6-frame burst. The camera warmed the stream, discarding 5 frames
+once at startup, and handed over 6 fresh ones. `Burst::from_frames` then took
+`&frames[agc_settle_frames..]` and threw 5 of those 6 away. One frame is not a pair, so the
+burst never formed.
+
+Both defaults are correct for the caller each was written for, and that is the whole bug.
+`agc_settle_frames = 5` is right for the corpus, which arrives as 90-frame `.gray`
+recordings whose head is genuinely unsettled. `warmup = 5` is right for a warm streaming
+session. Composing them was nobody's default.
+
+### The fix
+
+The daemon sets `agc_settle_frames = 0` explicitly, with the reason written at the
+assignment: for live capture the discard belongs to the camera layer, which already did it
+at `Capture::start` and which additionally flushes every queued frame before each burst
+(**P2-c**, fresh frames only). So every frame the daemon hands to the vision crate is
+already post-warmup and post-flush, and a second discard has nothing left to discard.
+
+A startup guard was added beside it, because the failure mode was silent rather than loud:
+a `burst_frames` too small to yield `min_pairs` now refuses to start, instead of binding the
+socket and answering `Unavailable` forever.
+
+### Why the tests could not have caught it
+
+Every corpus test feeds `Burst::from_planar` a 90-frame recording, where discarding 5 twice
+still leaves 80. The bug is only reachable when the burst is short — which is to say, only
+when the frames come from a camera rather than from a file. The vision crate's headless
+replayability is the property that makes its security claims falsifiable (wiki/04), and this
+is its exact cost: the seam between two correct crates has no corpus.
+
+### The lesson
+
+**A default is a claim about a caller.** Two crates each owning a settle-frame default is
+not duplication to deduplicate; it is two different questions with the same name. The bug
+appears at the moment one crate becomes the other's caller, and the fix is not to delete
+either default but to make the composing layer say which one applies and why.
+
+It is [B19](#b19)'s lesson at a different seam: there, a sidecar stated a parameter it had
+never observed. Here, a pipeline applied a correction that had already been applied. Both
+are a number carried across a boundary without anyone asking what it meant on the other
+side.
+
+---
+
+## B21 — A liveness threshold calibrated by choosing its own ROI {#b21}
+
+**Severity: high — caught before it was believed, which is the only reason it is not
+critical.** For about twenty minutes this test reported that falloff **separates** a flat
+surface from a live face by 2.45×. It does not. The separation was manufactured by the
+rule that chose where to measure.
+
+### How it happened
+
+Falloff needs a face box. A flat presentation has no face, so YuNet returns nothing and the
+ROI has to come from somewhere else. Three rules were tried, in this order:
+
+1. **Fixed box at the median live position** (108×138 at 296,111). On `flat_printed_page` it
+   straddled the top edge of the notebook — two thirds page, one third dark background. The
+   bright/dark step inside the ROI read **CV 0.4489, above every live face.** Nonsense, and
+   visibly so: a flat surface cannot beat a face on geometry, because across a head-sized
+   region at 40 cm the corners are only ~2.5% further from the emitter, so centre/edge should
+   be ≈1.05 and it read 1.314.
+2. **Search for the box whose weakest cell is strongest** — the obvious "is it on the object"
+   rule. Gave **CV 0.1085 against worst live 0.2661**, a clean 2.45× margin, and the test
+   printed `SEPARATED`.
+3. **Every valid on-object placement, as a distribution.** `0.0361 … 1.7116`, median
+   **0.2486** — against a worst live of 0.2661.
+
+Rule 2 is rule 3's minimum. Maximising the weakest cell selects the most *uniformly lit*
+patch, which is precisely the patch with the lowest CV. The rule intended to answer "is the
+box on the object?" silently also answered "which part of the object flatters the defence?"
+
+The spread is not a detail. **0.036 to 1.71 is wider than the entire live band**, so under
+rule 2 the ROI choice, not the physics, decided the result.
+
+### Why no ROI rule fixes this
+
+The real pipeline never chooses an ROI. **YuNet returns the box** — and against a genuine
+print attack it returns the box *on the printed face*. So the only number that decides
+anything is falloff over a **detected** box on a **printed face**, and no amount of cleverness
+about where to put a rectangle on a blank page produces it.
+
+A blank page is not a conservative stand-in either. It is an **optimistic** one: a printed
+face carries albedo structure — dark brows, bright forehead, shadowed sockets — and albedo
+variation enters the ON−OFF difference exactly like geometric variation does, because the
+check cannot tell them apart. A real print should therefore read *higher* than a blank page,
+i.e. closer to live.
+
+That last point is the uncomfortable one, and it generalises beyond this bug: **falloff
+assumes the only thing modulating the emitter's response across the face box is distance.**
+Albedo modulates it too, and a photograph of a face is by construction a surface whose albedo
+pattern imitates a face.
+
+### Consequences
+
+- **The falloff floor stays uncalibrated**, and Phase 0's S5 stays open. The 2026-08-09
+  session did not close it.
+- **The test no longer emits a verdict from a chosen ROI.** It prints the placement
+  distribution and refuses. `SEPARATED` is reachable only from detected boxes.
+- **Falloff's premise needs stating in [05](05-vision-pipeline.md)** — that it reads geometry
+  — alongside the fact that albedo is a confound it cannot separate.
+
+### The lesson
+
+The bug was not the ROI rule. It was that **a free parameter was chosen after seeing which
+value made the answer come out well**, without anyone deciding that was what was happening.
+Rule 2 was picked because it sounded principled, and it *is* principled for the question it
+was written for. It just also silently answered the question being measured.
+
+Whenever a measurement has a knob the measurement itself does not fix, sweep the knob and
+publish the range before quoting any single value from it. Had the sweep been run first, no
+version of this would have been believed for a minute — it took ten lines and it is now
+what the test does by default.
+
+---
+
+## B20 — The ambient gate is opened by the attacker, not closed {#b20}
+
+**Severity: critical.** [B18](#b18) placed the ambient gate on the argument that the floor is
+the one quantity an attacker can only move in the *safe* direction:
+
+> "The floor is the only candidate an attacker can move in one direction only: raising
+> ambient raises the floor, which **closes** the gate."
+
+**That is refuted by measurement.** Presenting a bright object 40 cm from the lens collapses
+the measured floor, which **opens** the gate.
+
+### The evidence, from one session
+
+2026-08-09, one room, one lighting description, six takes over nine minutes:
+
+```text
+capture                      floor    whole:amp   verdict
+live_bright_control          28.221       64.20   GATED  (AmbientTooBright)
+nonflat_wrapper_crinkled      0.529       38.92   GATED
+attack_wrapper_floodlight     0.111       38.34   GATED
+nonflat_card_bowed            0.082       51.75   GATED
+nonflat_mug_ceramic           0.013       39.59   passed the gate -> REJECT (dark-frame)
+```
+
+The operator's own face reads **28.221 and is refused**. A ceramic mug held where the face
+was reads **0.013 — a factor of 2,170 lower — and passes**. Same room, same minute, same
+sidecar. The honest user cannot get under the gate; the presented object gets under it
+easily, because *the object is what sets the floor*.
+
+### Why: exposure, not gain, and it is measurable
+
+The mechanism is visible in the asymmetry between the two columns:
+
+```text
+                    live -> mug     ratio
+ambient floor    28.221 -> 0.013   2,170x  collapses
+strobe amplitude  64.20 -> 39.59     1.6x  barely moves
+```
+
+A **gain** reduction scales signal and pedestal together, so both columns would fall by the
+same factor. They do not. A shorter **exposure** scales the ambient contribution with
+integration time while still catching the emitter pulse in full — which produces exactly
+this: pedestal down three orders of magnitude, amplitude down 1.6x. The sensor AGC is
+responding to a bright near object by shortening exposure, and the ambient pedestal goes
+with it.
+
+So `pedestal` was never measuring the room. It measures *what the AGC settled on*, which is
+dominated by whatever is nearest and brightest — i.e. by the attacker's prop.
+
+### What held, and it should be said as plainly as what broke
+
+Nothing was falsely accepted. Layered defence did its job:
+
+- The mug was the only capture through the gate, and `dark_ratio_max` rejected it — at
+  **1.79e-3 against a 1e-3 threshold, a 1.8x margin.** Thin, and now the load-bearing layer
+  for this whole class. Worth recording as its own risk.
+- The floodlight take was **gated at 0.111** — injected IR *raised* the floor and closed the
+  gate, exactly as B18 designed. The one-direction claim holds for injected IR; it fails for
+  presented objects, which B18 never considered.
+
+### Consequences
+
+1. **The gate cannot stay keyed on a quantity the attacker sets.** Either it keys on
+   something an attacker cannot pull down, or the gate stops being a security control and
+   becomes a UX hint, with the real work done by the per-pair checks.
+2. **`Verdict::Environment`'s failure-budget exemption is now a probing oracle.** B18 exempted
+   `Environment` so weather could not disable face unlock. Combined with an attacker-lowerable
+   floor, that is unmetered retries against a control the attacker steers. The exemption needs
+   re-deciding before Phase 4 builds the rate limiter on it.
+3. **This is measurable, not just arguable.** `MSXU_CONTROL_METADATA` (selector 0x09) is
+   supported on this camera ([10/Probe 7](10-hardware-probe.md#probe-7--msxu-face-authentication-mode)) and the kernel exposes
+   `UVCM` on `/dev/video3`. If it carries `KSCAMERA_METADATA_CAPTURESTATS` exposure time, the
+   AGC hypothesis stops being an inference from two columns and becomes a per-frame reading.
+4. **It points the same way as Probe 6.** Short exposure suppressing ambient while preserving
+   the emitter pulse is precisely the effect MSXU face-auth mode is expected to produce
+   deliberately. This session got there by accident, driven by the AGC. That is encouraging
+   for the daylight question and it is **not** a substitute for running the experiment.
+
+### The lesson
+
+B18's gate was reasoned about as though the scene were a fixed property of the room and the
+attacker only added light to it. But the attacker controls the largest, nearest object in
+frame, and on a camera with automatic exposure and no manual override that means the attacker
+controls the exposure, and therefore the pedestal, and therefore the gate. **A threshold is
+only as trustworthy as the adversary's inability to move its input** — and "ambient light" was
+never an input the adversary lacked a handle on.
 
 ---
 
@@ -220,6 +443,141 @@ On this hardware Faciolock is a **low-ambient system**: evening, artificial ligh
 drawn. Daytime rooms with a real window are outside it. That belongs in
 [01](01-goals-and-scope.md) as an explicit non-goal, not buried here.
 
+### Correction (2026-08-08, later the same day) — the data held, the inference did not
+
+The matched pair above is good data and its narrow finding stands: **no magnitude
+statistic detects IR injection at high ambient.** That is why `dark_ratio_max` cannot be
+rescued, and nothing below weakens it.
+
+What does not follow is the next step — "therefore no liveness is possible here, therefore
+it is a hardware ceiling, therefore daylight is a non-goal." Three separate problems.
+
+**1. The optics explanation is refuted by its own premise.** It attributed Windows Hello's
+success in that room to better optics — 940 nm behind a bandpass filter. It is the *same
+laptop*: same sensor, same emitter, same glass. Optics cannot differ from themselves.
+Whatever Windows does differently is software operating on the same imagery, which makes
+Windows Hello working there *evidence that the problem is solvable on this sensor*, not a
+mystery about someone else's hardware.
+
+The obvious candidate was checked and refuted. The IR camera carries a Microsoft Camera
+Extension Unit (unit 4, `{0f3f95dc-2632-4c4e-92c9-a04782f43bc8}`) advertising
+`MSXU_CONTROL_FACE_AUTHENTICATION`, and Linux had never set it — every capture in the
+corpus was taken in `DISABLED`, the general-purpose IR preview mode. Setting
+`ALT_FRAME_ILLUM` works and persists, and **does not move the ambient floor**:
+
+```text
+DISABLED (baseline)     20.407
+ALT_FRAME_ILLUM         18.958   20.693   21.213   21.087
+```
+
+Session variance swallows it. This camera already strobed in `DISABLED` and its face-auth
+mode does not change the integration time. See [10/Probe 7](10-hardware-probe.md#probe-7--msxu-face-authentication-mode).
+
+**2. Both captures in the matched pair contain a live face.** From the sidecars:
+`attack_floodlight_room` is *"IR remote at sensor, face in frame, same position"*;
+`attack_floodlight_daylight` is *"IR remote at sensor, face in frame"*. So the comparison
+was a live face against a live face plus a contaminant. Ranking one above the other on
+"live-lookingness" is measuring the injection, which is real and worth knowing — but it
+says nothing about whether a **spoof** would pass, because neither capture holds one. The
+corpus contains exactly one spoof (`spoof_phone`, no floodlight), rejected by detection.
+
+**3. One statistic was never in the comparison, and it is the one that survives.** Every
+candidate tried — old ratio, A, B, C, whole-frame SNR, face-box SNR — is a **magnitude**.
+Magnitudes carry the ambient pedestal, which is precisely why they converge.
+
+`falloff_cv` is not a magnitude. It runs over `on_cells - off_cells`, and a pedestal
+present in both phases **cancels exactly** in that subtraction. What survives is the
+emitter's inverse-square pattern across the face box — a nose at 38 cm returns more than a
+cheek at 45 cm — which is subject *geometry*. Ambient light does not change a subject's
+geometry.
+
+It had never been measured in daylight because the ambient gate refuses the burst *before*
+liveness runs, so `liveness_corpus` prints `no box` for exactly the three captures that
+would answer the question. Measured now, going around the gate
+(`falloff_is_computed_on_a_difference_so_ambient_should_cancel`):
+
+```text
+capture                     pedestal   falloffCV   ctr/edge
+live_lit_angle_left            0.000      0.2661      1.520
+live_lit_frontal               0.000      0.2802      1.446
+live_lit_frontal               0.000      0.3012      1.469
+live_lit_glasses               0.000      0.3066      1.624
+live_dark_frontal              0.000      0.3130      1.509
+live_night_lamp                0.001      0.3481      1.527
+live_daylight_half             0.920      0.3245      1.687
+live_room_lit                 13.909      0.3071      1.481   <- the problem room
+live_daylight_frontal         51.737      0.3847      1.774   <- 1300x over the gate
+
+nocturnal  n=7   CV 0.2661 - 0.3481
+daylit     n=2   CV 0.3071 - 0.3847
+```
+
+**The ranges overlap completely.** The problem room reads mid-band. At pedestal 51.7,
+where every magnitude statistic is dead, the shape is the strongest in the corpus. Falloff
+is ambient-invariant in measurement, not only in derivation.
+
+The gate is therefore placed at the wrong **layer**. It was derived to protect
+`dark_ratio_max` — correctly — but it sits in front of the whole burst and takes `falloff`
+down with it.
+
+### What this does and does not license
+
+It does **not** license opening the gate. `falloff` enforces only a degenerate-flatness
+floor of 0.05 against a live band bottoming at 0.2661, because **no print has ever been
+recorded**. Opening the gate today would trade a *measured refusal* for an *unmeasured
+acceptance*, which is the wrong direction however the ceiling was misdiagnosed.
+
+And falloff cannot cover for `dark_ratio_max`. The same table, run over the attack
+captures, says so plainly:
+
+```text
+attack_floodlight_room        14.052      0.3173      1.602
+attack_floodlight_daylight    20.329      0.3963      1.954
+```
+
+Live-like, as expected — those captures contain live faces. **Falloff measures subject
+geometry, so it cannot see injected IR**, and standing `dark_ratio_max` down in high
+ambient stands down the only check aimed at injection, in exactly the regime where
+injection is cheapest. Whether an attacker can *shape* a difference image — an angled
+floodlight across a print, a synchronised strobe — is an open claim, not a solved one.
+
+**So the blocker on daylight was never the sensor. It is the missing negative class** —
+Phase 0's S5, deferred since day one and still the project's one genuinely unproven claim.
+The recordings that close it, all in the high-ambient room:
+
+- `flat_printed_page` — calibration, and the load-bearing one. ~~**No printer and no printed
+  face are required.**~~ **Superseded 2026-08-09 by [B21](#b21): a printed *face* is
+  required**, because a faceless object gives YuNet no box and the ROI then has to be
+  chosen, over a range wider than the live band. No *printer* is still true, and the face
+  still need not be the enrolled user's — any head-sized printed face will do. Falloff
+  measures whether the emitter's response across a region is
+  flat or domed — surface geometry and IR reflectance — so it does not care what is
+  depicted. Worth repeating at night for the cross-check,
+  since CV appears to *rise* with ambient (0.3847 at pedestal 51.7 is the corpus maximum),
+  the direction that could push a flat surface past a nocturnally-set floor.
+- `flat_blank_card` — the same, unprinted. Ink varies IR reflectance and lifts CV, so
+  printed matter is the realistic attack and blank card is the floor beneath it. The pair
+  brackets the flat class rather than guessing where inside it a real spoof sits.
+- `flat_curved_page` — the printed page curved around a mug. The presentation that tries to
+  *manufacture* falloff, and the likeliest to approach the live band.
+- **`attack_flat_floodlight`** — the flat page *plus* the IR remote. A spoof with injected
+  IR, which is the only capture that speaks to standing `dark_ratio_max` down.
+- `spoof_tablet_bright` — completeness only. **A screen cannot calibrate falloff:**
+  `spoof_phone` already reads `no face`, because the IR camera sees the emitter reflected
+  off the glass rather than the displayed image, so screens are refused by detection and
+  never reach the check. Useful as the corpus's first daylight screen capture; useless as a
+  negative class.
+
+**What a `flat_*` capture can and cannot settle.** It has no face for YuNet to find, so it
+is measured over a **fixed** box — the median of this corpus's twelve detected live boxes,
+108×138 at (296, 111) — and the test labels the row `FIXED box` so it is never mistaken for
+a detected one. That makes flat-vs-live a fair comparison of *surface geometry*, provided
+the object is held at the same ~40 cm and fills the frame like a head. It is **not** an
+end-to-end attack replay: a real spoof must also pass detection, and these deliberately
+cannot. What they calibrate is the flatness floor, which is the one quantity blocking a
+rescope. `tools/record-negatives.sh` prompts through the set and the falloff test then
+prints the margin — worst live CV against best flat CV — directly.
+
 ### Resolved by an environment gate (2026-08-06)
 
 `Config::ambient_floor_max = 0.04`, checked in `Burst::from_frames` **before tier
@@ -309,6 +667,28 @@ and did not say so.
 The corpus is the project's evidence, and a corpus that is uniform in a variable nobody
 recorded cannot reveal that the variable matters. `record.sh` now records ambient
 conditions and local time ([B19](#b19)).
+
+**And a second lesson, from the correction rather than the bug** (added 2026-08-08):
+
+*A ratio is invariant to gain, a difference is invariant to offset — and a **shape** is
+invariant to both.* Every candidate the first pass considered was a scalar summary of
+brightness, so every one of them inherited the pedestal, and enumerating six of them felt
+like thoroughness while being six draws from a single family. The check that survived was
+already in the codebase and was never tried, because the gate that made the daylight
+problem visible also hid the one measurement that answered it.
+
+*Check what a control group is a control for.* The matched pair was designed carefully —
+same room, same position, 90 seconds apart, ambient within 1% — and that care is exactly
+what made its conclusion persuasive. Both arms contained a live face. No amount of
+experimental control rescues a comparison whose two arms are the same class; the
+sidecar said so in plain English (`"face in frame"`) and it was read as a detail rather
+than as the design of the experiment.
+
+*When a claim rests on "their hardware is better", check that it is not your hardware.*
+The optics story was plausible, well-sourced, and physically correct about 940 nm — and
+irrelevant, because the comparison machine was this machine. A single sentence in the
+report ("same hardware where I used Windows") was sufficient to refute a paragraph of
+correct physics.
 
 ---
 

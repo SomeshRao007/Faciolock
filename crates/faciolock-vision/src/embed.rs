@@ -198,6 +198,12 @@ impl Template {
         self.embeddings.is_empty()
     }
 
+    /// Read-only, so the store can serialise a template without being able to build one
+    /// that skipped [`Embedding::new`]'s normalisation.
+    pub fn embeddings(&self) -> &[Embedding] {
+        &self.embeddings
+    }
+
     /// Similarity to the closest enrolled embedding.
     pub fn best_similarity(&self, probe: &Embedding) -> f64 {
         self.embeddings

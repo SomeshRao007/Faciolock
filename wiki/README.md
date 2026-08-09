@@ -14,9 +14,29 @@ independent OpenCV references, which is what caught [B16](11-bug-log.md#b16).
 [B18](11-bug-log.md#b18) — every strobe statistic was a ratio, and ambient daylight
 saturates a ratio — which is now fixed by moving to the difference domain and by an
 **ambient gate**: above a measured floor this hardware reports "cannot verify" and PAM
-falls through to the password, rather than guessing. That is the honest ceiling, and it
-is where the class sits: Windows Hello fails the same way with purpose-built optics, and
-Howdy passes in daylight by checking nothing.
+falls through to the password, rather than guessing.
+
+**The gate is at the wrong layer, and that is the open question of Phase 2.** It was
+derived to protect `dark_ratio_max`, which genuinely dies in ambient light, but it sits in
+front of the whole burst and so it also disables `falloff` — which is computed on the ON−OFF
+*difference*, where the ambient pedestal cancels exactly, and which measurement now shows is
+**unaffected by ambient right up to a pedestal of 51.7**. Daylight was written up as a
+hardware ceiling; that was wrong, on a same-hardware fact (Windows Hello succeeds in the
+room where Faciolock refuses, on this laptop). What blocks daylight is the negative class:
+`falloff` has never been calibrated against a print, so opening the gate would trade a
+measured refusal for an unmeasured acceptance. One afternoon of recording closes it —
+**[13](13-daylight.md)** now holds that question in one place, with the ways out ranked.
+
+One thing stated there that was not stated plainly anywhere before: the ambient gate is a
+**UX hint, not a security control**, since [B20](11-bug-log.md#b20) showed the attacker sets
+its input.
+
+**`faciolockd` now answers, and Phase 2's exit criterion 4 is met** — `SOCK_SEQPACKET` at
+0600, SHA256-verified models, a warm stream, and a real verdict from the real camera in
+365 ms ([09](09-roadmap.md#phase-2--camera--daemon-skeleton-week-3)). The first run of it
+found [B22](11-bug-log.md#b22): two crates each discarded the AGC settle frames, leaving 1
+usable frame of 6, so **every** live authentication would have failed. 119 passing tests did
+not see it, because the seam between two correct crates has no corpus.
 
 The frame burst is now **measured at 404 ms** against a 130 ms estimate
 ([B19](11-bug-log.md#b19)), so the warm path is ~673 ms against a 400 ms target and
@@ -37,6 +57,8 @@ The frame burst is now **measured at 404 ms** against a 130 ms estimate
 | [09 — Roadmap](09-roadmap.md) | 8 phases, exit criteria, risk register |
 | [10 — Hardware Probe Log](10-hardware-probe.md) | Exact commands + raw output from the reference machine |
 | [11 — Bug Log](11-bug-log.md) | Bugs hit and fixed, with the design changes they forced |
+| [12 — Falloff Calibration Log](12-falloff-calibration.md) | Recording sessions and readings for the falloff check; S5 is still open |
+| [13 — Daylight](13-daylight.md) | The daylight question in one place: what blocks it, the ways out ranked by cost, what is already refuted |
 
 ## One-paragraph summary
 
@@ -109,12 +131,18 @@ hardware and resolves to the RGB camera —
 
 | Claim | Status |
 |---|---|
+| The ambient gate keys on a quantity **only the attacker can raise** | **refuted 2026-08-09** — presenting a bright object 40 cm from the lens collapses the floor 2,170×: the operator's own face read 28.221 and was *gated*, a ceramic mug in the same minute read 0.013 and *passed*. The AGC shortens exposure for a bright near object and the pedestal follows, so the attacker sets the gate's input ([B20](11-bug-log.md#b20)) |
+| Falloff separates a live face from a **flat print** | **still unmeasured, after three recording attempts.** A flat blank page was captured 2026-08-09 and cannot settle it: with no face to detect, the ROI must be chosen, and across valid placements CV spans 0.036–1.71 (median 0.249) against a worst live of 0.2661 — wider than the live band, so the choice decides the answer ([B21](11-bug-log.md#b21)). Needs a flat presentation of a FACE, so detection supplies the ROI. A blank page is an *optimistic* stand-in, not a conservative one: print albedo adds variance falloff cannot distinguish from depth |
 | Hardware self-strobes, every frame | **measured**, 4 independent runs, and now in daylight too — the emitter never stops |
 | ~~15 ON/OFF pairs/sec~~ | **withdrawn.** 30 fps was the *advertised* rate; delivered is 12–15 fps, so ~6–7 pairs/sec ([B19](11-bug-log.md#b19)) |
 | Dark-frame integrity rejects an IR floodlight | **verified at negligible ambient IR only** — 4 orders of margin and 0 false rejects across 210 live pairs, all nocturnal. In daylight the same check rejects **100% of honest captures** (0.664 against a 0.001 threshold). The check is a ratio and ambient light is an offset ([B18](11-bug-log.md#b18)) |
 | The strobe is detectable in daylight | **verified** — as a *difference*: SNR 549 whole-frame, 882 over the face box, sign regularity 1.000. `classify` was rewritten to measure it ([B18](11-bug-log.md#b18)) |
-| Liveness can be **distinguished from a floodlight attack** above an ambient floor of ~1 | **refuted, by a matched pair** — same room, same position, 90 s apart, ambient within 1% (13.91 vs 14.05). Every statistic ranked the attack as *more live-looking than the operator's real face*. A hardware ceiling, not a tuning problem ([B18](11-bug-log.md#b18)) |
-| Faciolock works in a normally lit daytime room | **no, and this is now a stated non-goal** ([01](01-goals-and-scope.md)). A large room with indirect sun ~10 m away reads 13.91 — 348× over the gate. It authenticates in dim and artificially-lit rooms and refuses otherwise |
+| **Magnitude** statistics can distinguish a floodlight from a live face above ambient ~1 | **refuted, by a matched pair** — same room, same position, 90 s apart, ambient within 1% (13.91 vs 14.05). Every magnitude tried — ratio, SNR, response — ranked the attack at or above the live face. `dark_ratio_max` cannot be rescued ([B18](11-bug-log.md#b18)) |
+| ~~That refutation makes daylight a **hardware** ceiling~~ | **withdrawn 2026-08-08.** Three errors: the 940 nm-optics explanation is refuted by its own premise (Windows Hello succeeds in that room *on this same laptop*); both captures in the matched pair contain the operator's live face, so it compared live against live and no spoof was present; and every candidate in it was a magnitude, which is the class that provably fails |
+| **Falloff is ambient-invariant** — the pedestal cancels in the ON−OFF difference | **verified across the corpus.** Daylit live band CV 0.307–0.385 sits *inside* the nocturnal band 0.266–0.348; the problem room reads 0.3071 mid-band and a capture at pedestal 51.7 reads 0.3847, the corpus maximum. The gate refuses bursts this check can still read ([B18](11-bug-log.md#b18)) |
+| Falloff can cover for `dark_ratio_max` against IR injection | **refuted, same table** — attack captures read live-like (0.3173, 0.3963) because they contain live faces. Falloff measures subject *geometry*; it cannot see injected IR |
+| The camera's **face-authentication mode** would lower the ambient floor | **refuted by measurement.** The IR camera advertises `MSXU_CONTROL_FACE_AUTHENTICATION` and Linux had never set it — every corpus capture was taken in `DISABLED`. Setting `ALT_FRAME_ILLUM` works, persists, and moves the floor not at all: 20.41 baseline vs 18.96/20.69/21.21/21.09 ([10/Probe 7](10-hardware-probe.md#probe-7--msxu-face-authentication-mode)). **Confirmed again 2026-08-09** in the bright room at ~2× the ambient and in reverse order, so drift worked against the hypothesis: 39.206 `DISABLED` vs 33.404/38.872 `ALT`, the mode's own repeat spread exceeding the between-mode gap, amplitude flat at 59.6–60.5. Coherent, because this sensor already self-strobes 24/7 — `DISABLED` *is* alternating illumination and the flag is bookkeeping |
+| Faciolock works in a normally lit daytime room | **not yet, and it stays a non-goal pending calibration** ([01](01-goals-and-scope.md)). The blocker is the missing negative class, not the sensor: `falloff` enforces a 0.05 flatness floor against a live band bottoming at 0.2661 because **no print has ever been recorded**. Opening the gate today trades a measured refusal for an unmeasured acceptance |
 | The RGB camera could supply liveness where IR cannot | **refuted by measurement** — it has an IR-cut filter and cannot see the emitter at all: strobe amplitude 0.049 and SNR 0.85 against the IR camera's 48–81 and 1,500–15,000 |
 | YuNet detects a face in **daylight** IR | **verified** — and the face-box emitter response is 2.2× the whole-frame one, as inverse-square predicts |
 | One contaminated pair sinks a burst (conjunctive aggregation) | **verified** — replayed in CI on synthetic and recorded captures |
@@ -124,4 +152,4 @@ hardware and resolves to the RGB camera —
 | ~~Response test rejects screens~~ | **refuted** — a phone reads D=36 against a live minimum of 48.6, not ~0. The statistic is whole-frame, so it measures the room ([B17](11-bug-log.md#b17)) |
 | A phone screen showing a photo is rejected | **verified** — but by *detection* (`NoFace`), not by any liveness check |
 | **Falloff test rejects printed photos** | **untested, and deliberately deferred (2026-08-04).** [B7](11-bug-log.md#b7) is closed; no print has been recorded. The check therefore enforces only a degenerate-flatness floor and claims nothing about prints |
-| False accept rate | **unmeasurable** — the corpus has one subject. The 0.363 cosine threshold is paper-derived |
+| False accept rate | **unmeasurable** — the corpus has one subject. The 0.363 cosine threshold is paper-derived || Falloff separates a live face from a **flat print** | **undetermined.** Three recording sessions; no reading that settles it. A flat page was captured on 2026-08-09, but with no face in it YuNet supplies no ROI, and across the 501 placements lying fully on the page the CV spans 0.0361–1.7116 (median 0.2486) against a live band of 0.2661–0.3847 — so the answer depends on the placement rule. Resolving it needs a printed face, so that detection supplies the ROI as it would in the pipeline ([12](12-falloff-calibration.md)) |

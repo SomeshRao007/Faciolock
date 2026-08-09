@@ -463,6 +463,118 @@ than `videoN`. See Probe 4 for why not `by-id`.
 
 ---
 
+## Probe 7 — the camera has a face-authentication mode, and Linux never set it {#probe-7--msxu-face-authentication-mode}
+
+**Why:** the reference machine dual-boots, and Windows Hello authenticates in a room where
+Faciolock refuses ([B18](11-bug-log.md#b18)). Since it is the same sensor, emitter and
+glass, the difference has to be in how the camera is *driven*, not in what it can see.
+
+### What the descriptors say
+
+```bash
+lsusb -v -d 3277:0018 | awk '/bInterfaceNumber        2/,/bInterfaceNumber        4/'
+```
+
+The IR camera's VideoControl interface carries two extension units:
+
+```text
+EXTENSION_UNIT bUnitID 3   {28f03370-6311-4a2e-ba2c-6890eb334016}   Sonix, vendor
+  bmControls 0x00                       <- nothing advertised on the IR path
+
+EXTENSION_UNIT bUnitID 4   {0f3f95dc-2632-4c4e-92c9-a04782f43bc8}   Microsoft Camera XU
+  bmControls 0x20 0x01                  <- D5 = selector 0x06 FACE_AUTHENTICATION
+                                           D8 = selector 0x09 METADATA
+INPUT_TERMINAL Camera Sensor  bmControls 0x00240000   -> Privacy only
+PROCESSING_UNIT               bmControls 0x00000000   -> nothing
+```
+
+So the IR path exposes **no exposure and no gain control** through standard UVC — the RGB
+path does (`0x0024000e`: auto-exposure mode, priority, exposure time absolute), the IR path
+does not. Anything that changes IR capture behaviour has to go through the Microsoft XU.
+
+Independent confirmation of the GUID and the bit numbering: the kernel already lights up
+`UVCM` (UVC MSXU metadata) on the IR metadata node, which is selector 0x09 / D8.
+
+```bash
+v4l2-ctl -d /dev/video3 --list-formats-meta      # [1]: 'UVCM' (UVC MSXU Metadata)
+```
+
+### What the firmware answers
+
+`spikes/msxu/probe.py` — read-only, `UVCIOC_CTRL_QUERY` with GET requests only.
+
+```text
+unit 4, selector 0x06 (FACE_AUTHENTICATION)
+  GET_LEN  = 9        GET_INFO = 0x03  [SET_CUR, GET_CUR]
+  GET_MAX  : 01 03 03 00 ...   iface 0x03  flags 0x3  [DISABLED | ALT_FRAME_ILLUM]
+  GET_DEF  : 01 03 01 00 ...   iface 0x03  flags 0x1  [DISABLED]
+  GET_CUR  : 01 03 01 00 ...   iface 0x03  flags 0x1  [DISABLED]
+```
+
+**The camera advertises a dedicated face-authentication capture mode and Linux has never
+set it.** Every recording in `corpus/` was made in `DISABLED` — the general-purpose IR
+preview mode. Streaming interface `0x03` in the payload is the IR VideoStreaming interface,
+matching the descriptor; `flags 0x3` is the exact combination the spec permits for a pin
+that is *also* general-purpose (D0 alongside D1), which is a self-consistency check on the
+decode.
+
+Modes are from `KSPROPERTY_CAMERACONTROL_EXTENDED_FACEAUTH_MODE`: D0 `DISABLED`,
+D1 `ALTERNATIVE_FRAME_ILLUMINATION`, D2 `BACKGROUND_SUBTRACTION`. This device offers D0 and
+D1; it does not offer hardware background subtraction.
+
+### Setting it changes nothing measurable
+
+`spikes/msxu/set_mode.py alt` — `SET_CUR` is accepted, reads back `ALT_FRAME_ILLUM`, and
+survives the file descriptor closing. Ambient floor, same room, same session:
+
+```text
+DISABLED (baseline)     20.407
+ALT_FRAME_ILLUM         18.958   20.693   21.213   21.087
+```
+
+Session variance swallows the difference.
+
+**Confirmed independently 2026-08-09**, in the bright room at roughly twice the ambient, and
+recorded in **reverse order** so that any session drift would work *against* the hypothesis
+rather than for it. 35 frames per reading, nobody in frame:
+
+```text
+                            floor   amplitude      SNR
+ALT_FRAME_ILLUM (as left)  33.404       59.77    180.0
+DISABLED                   39.206       60.47    238.1
+ALT_FRAME_ILLUM (repeat)   38.872       59.61    116.8
+```
+
+The mode's own two readings differ by 16% — more than either differs from `DISABLED` — and
+amplitude is flat across all three at 59.6–60.5. Two sessions, two ambient levels, opposite
+orderings, same answer.
+
+**The exposure hypothesis is refuted** — this camera already strobed in `DISABLED`, and its
+face-auth mode does not shorten the integration time. The no-op is *coherent* rather than
+firmware weirdness: this sensor self-strobes 24/7 ([Probe 3](#probe-3--per-frame-mean-luma-the-decisive-test),
+four independent runs), so `DISABLED` already behaves as `ALTERNATIVE_FRAME_ILLUMINATION`
+and the flag is bookkeeping that tells Windows' pipeline how to interpret frames, not a
+switch that changes them. That also retroactively explains Q3: there was never exposure
+magic attached to the flag to find. Whatever Windows Hello does in that bright room, it is not buying a lower
+ambient floor from the firmware; it is doing something different with the same imagery.
+Which is what sent B18's investigation back to the statistics, where the answer was.
+
+The camera was returned to `DISABLED` (its own `GET_DEF`) afterwards. The mode does not
+survive a USB replug in any case.
+
+**Left unverified:** whether `ALT_FRAME_ILLUM` populates per-frame illumination tags in the
+`UVCM` metadata node. If it does, that is hardware ground truth for ON/OFF phase in place of
+`frame::classify` inferring it from luma — a robustness win against exactly the failure
+B18 documented, but not a daylight win, and not urgent.
+
+**Not probed on purpose:** the Sonix XU (unit 3). It advertises no controls on the IR path,
+and interface 4 of this device is an undriven "Application Specific" interface that looks
+like a firmware-update endpoint. Blind vendor `SET_CUR` sweeps are the one irreversible
+risk in this area; if the MSXU path is ever exhausted, use `linux-enable-ir-emitter`'s
+quirk database rather than guessing.
+
+---
+
 ## Still to probe
 
 - [ ] Behaviour in a fully dark room (does AGC push ON frames higher?)

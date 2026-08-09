@@ -35,25 +35,44 @@ cannot go in the archive.
   Liveness on RGB alone is a research problem; on IR it is mostly physics.
 - **No cloud, no network.** The daemon runs with `PrivateNetwork=yes`.
 - **No GPU requirement.** CPU-only must hit the budget. GPU/NPU is optional later.
-- **Not a daylight system, on the reference hardware.** Added 2026-08-08 from measurement,
-  not from preference. Strobe liveness works by comparing an emitter-lit frame against a
-  dark one, and ambient near-infrared lifts both. Above an ambient floor of roughly 1 the
-  margin is gone: a matched pair at floor ~14 measured a floodlight attack as **more
-  live-looking than the operator's real face on every statistic tried**
-  ([B18](11-bug-log.md#b18)).
+- **Not a daylight system yet, on the reference hardware.** Added 2026-08-08 from
+  measurement; **the reason was corrected later the same day, and the scope is provisional
+  rather than permanent** ([B18](11-bug-log.md#b18)).
 
-  So Faciolock authenticates in **dim and artificially-lit rooms** — evening, night,
-  curtains drawn, ceiling light — and **refuses** in a daytime room with a real window,
-  reporting `Environment` so PAM falls through to the password. A large room whose only
-  sunlight is indirect and ~10 m away already reads 13.91.
+  What holds: above an ambient floor of roughly 1, no **magnitude** statistic separates an
+  honest capture from one with IR injected — ratios, SNRs and responses all carry the
+  ambient pedestal and converge as it rises. `dark_ratio_max` is a magnitude and cannot be
+  rescued. So today Faciolock authenticates in **dim and artificially-lit rooms** —
+  evening, night, curtains drawn, ceiling light — and **refuses** in a daytime room with a
+  real window, reporting `Environment` so PAM falls through to the password. A large room
+  whose only sunlight is indirect and ~10 m away reads 13.91.
 
-  This is a property of the sensor, not of the design. Purpose-built face-auth optics use a
-  940 nm emitter behind a narrow bandpass filter, because 940 nm sits inside a solar
-  water-vapour absorption band; that hardware would see a far lower floor in the same room.
-  The reference camera offers neither, and exposes no exposure or gain control to
-  compensate. **Widening this is a hardware-compatibility question, not a tuning one** —
-  it belongs in the compatibility list, and it is the strongest argument for testing
-  940 nm hardware before any claim about daylight is made.
+  What was **wrong**: this was first written up as a property of the sensor, on the theory
+  that purpose-built face-auth optics use a 940 nm emitter behind a bandpass filter and
+  would see a lower floor in the same room. That reasoning is refuted by its own premise —
+  Windows Hello succeeds in that room *on this same laptop*, with this same sensor,
+  emitter and glass. Optics cannot differ from themselves. The camera's Microsoft
+  face-authentication capture mode was then found unset and tried: it works, and it does
+  not move the ambient floor either
+  ([10/Probe 7](10-hardware-probe.md#probe-7--msxu-face-authentication-mode)).
+
+  What actually blocks it: **the falloff check is ambient-invariant and has never been
+  calibrated.** It runs on the ON−OFF difference, where the pedestal cancels exactly,
+  leaving the emitter's inverse-square pattern over the face box — subject geometry, which
+  ambient light cannot change. Measured across the corpus, the daylit live band
+  (CV 0.307–0.385, including the problem room and a capture at pedestal 51.7) sits inside
+  the nocturnal band (0.266–0.348). The gate sits in front of the whole burst, so it takes
+  this check down along with the one it was derived to protect.
+
+  It stays a non-goal **pending negative-class calibration** — n=2–3 daylit captures and no
+  flat-presentation recording at all. Opening it now would trade a measured refusal for an
+  unmeasured acceptance. The unlock is ten minutes of recording in the bright room, not
+  different hardware: a flat printed face, the same print curved, and the print *with* an
+  IR floodlight (`tools/record-negatives.sh`). No printer is needed and the face need not
+  be the enrolled user's — falloff asks whether a surface is flat, not who it is. A screen
+  cannot substitute: `spoof_phone` reads `no face`, because the IR camera sees the emitter
+  reflected off the glass rather than the image, so screens are refused by detection and
+  never reach the check.
 
 ## Why Rust
 

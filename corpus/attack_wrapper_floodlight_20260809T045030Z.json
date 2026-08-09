@@ -1,0 +1,18 @@
+{
+  "label": "attack_wrapper_floodlight",
+  "recorded_utc": "20260809T045030Z",
+  "recorded_local": "2026-08-09T10:20:41+0530",
+  "ambient": "big room good lighting from sun, source approx 10m away, itsnot very sunny just cloudly.",
+  "device_bypath": "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:7:1.2-video-index0",
+  "device_resolved": "/dev/video2",
+  "width": 640,
+  "height": 360,
+  "pixel_format": "GREY",
+  "fps_requested": 30,
+  "fps_delivered": 12.13,
+  "elapsed_s": 7.417345511,
+  "frames_requested": 90,
+  "frames_actual": 90,
+  "bytes": 20736000,
+  "note": "flat printed page AND IR remote at sensor, button down | RELABELLED 2026-08-09: the recorded object is not what the take asked for."
+}

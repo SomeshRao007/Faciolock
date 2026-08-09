@@ -244,7 +244,7 @@ carry an image. Budget accordingly.
 | Live face | bright, uneven falloff | black | — (passes) | **verified** — 210 pairs, 0 false rejects; falloff 0.266–0.313 over the real box |
 | Empty room | bright | black | **detection**, not liveness | **verified** — `NoFace`. Note it passes every liveness check: the emitter lights a wall perfectly well |
 | Phone / laptop screen | ~black | black | response test (`D≈0`) | untested — no sample yet |
-| Printed photo | bright, **flat** | black | falloff test | **untested, and the one that matters** |
+| Printed photo | bright, **flat** | black | falloff test | **untested, and the one that matters.** Three recording sessions have not produced a reading that settles it — log in [12](12-falloff-calibration.md) |
 | Perfectly flat presentation | bright, uniform | black | flatness floor (0.05) | **verified on synthetic data.** This is *all* the falloff check currently claims |
 | Video replay on screen | ~black | black | response test | untested |
 | External IR floodlight, continuous | bright | **bright** | dark-frame integrity | **verified** |

@@ -85,6 +85,24 @@ used to quote predates 2-of-3 matching and the 320×320 detector.
    [B18](11-bug-log.md#b18), since honest daylight captures currently cannot authenticate.
 3. [06](06-performance-budget.md) restated from the measured delivery rate.
 4. `faciolockd` answers a hand-rolled socket request with a real verdict from the real camera.
+   **Met 2026-08-09.** The daemon binds `SOCK_SEQPACKET` at 0600, loads and SHA256-verifies
+   both models, keeps a warm stream, and answers. Measured on the reference machine:
+
+   ```text
+   startup      6 frames warm in 339 ms          <- matches B19's 340-410 ms
+   Op::Status   not enrolled -> NoEnrolment      0 ms, no camera touched
+   Op::Status   enrolled     -> Deny             never Allow; one construction site
+   Op::Auth     -> Environment{floor 85.44} -> Unavailable      365 ms
+   Op::Enroll   -> Unavailable                   no unauthenticated enrolment endpoint
+   38-byte datagram (max 37) -> refused, no reply
+   ```
+
+   The first run of this criterion found [B22](11-bug-log.md#b22), which would have made
+   every live authentication fail. That is what the criterion is for.
+
+   **Floor 85.44 is a new corpus maximum** (previous 51.74), in the operator's room at
+   14:59 IST. The `Environment` answer is the documented daylight refusal, not a fault —
+   criterion 2 below is what closes it.
 
 If the burst cost is confirmed at ~340 ms, the latency conversation moves to **overlapping
 capture with compute** — SFace's 230 ms can hide inside the capture window — which is a
