@@ -562,16 +562,130 @@ Which is what sent B18's investigation back to the statistics, where the answer 
 The camera was returned to `DISABLED` (its own `GET_DEF`) afterwards. The mode does not
 survive a USB replug in any case.
 
-**Left unverified:** whether `ALT_FRAME_ILLUM` populates per-frame illumination tags in the
-`UVCM` metadata node. If it does, that is hardware ground truth for ON/OFF phase in place of
-`frame::classify` inferring it from luma — a robustness win against exactly the failure
-B18 documented, but not a daylight win, and not urgent.
+~~**Left unverified:** whether `ALT_FRAME_ILLUM` populates per-frame illumination tags in the
+`UVCM` metadata node.~~ **Answered by [Probe 8](#probe-8--the-metadata-node), and the
+premise was wrong: the tags are already there in `DISABLED`.** No mode change is needed to
+get hardware ON/OFF ground truth. Coherent with the rest of this probe — the sensor
+self-strobes 24/7, so `DISABLED` is alternating illumination and the firmware has always
+known which frames it lit.
 
 **Not probed on purpose:** the Sonix XU (unit 3). It advertises no controls on the IR path,
 and interface 4 of this device is an undriven "Application Specific" interface that looks
 like a firmware-update endpoint. Blind vendor `SET_CUR` sweeps are the one irreversible
 risk in this area; if the MSXU path is ever exhausted, use `linux-enable-ir-emitter`'s
 quirk database rather than guessing.
+
+---
+
+## Probe 8 — the metadata node, and what the firmware volunteers {#probe-8--the-metadata-node}
+
+**Why:** [B20](11-bug-log.md#b20) showed the ambient gate keys on a quantity the *attacker*
+sets — a bright object 40 cm from the lens collapses the measured floor 2,170×, because the
+AGC shortens exposure and the pedestal follows. That diagnosis is an inference from two
+columns of a table. If the camera reports its **exposure time** per frame, ambient
+irradiance becomes pedestal ÷ integration time and the gate gets an input the attacker no
+longer sits between. That was [13](13-daylight.md)'s option B.
+
+### The camera has two nodes, and only one of them is pixels
+
+```bash
+v4l2-ctl -d /dev/video3 --list-formats-meta
+```
+
+```text
+[0]: 'UVCH' (UVC Payload Header Metadata)
+[1]: 'UVCM' (UVC MSXU Metadata)
+```
+
+`/dev/video2` gives pixels. `/dev/video3` gives the camera's own notes about each frame —
+the USB payload headers, plus whatever extras the firmware appends under the Microsoft UVC
+spec. Both are the same physical camera; the metadata node only produces buffers while the
+video node is streaming, so the probe streams both at once.
+
+`spikes/msxu/metadata.py` — **read-only**, no `SET_CUR` anywhere, so Q3's deletion of
+emitter-control code stands.
+
+### What the firmware answers
+
+30 frames, `DISABLED` mode, bright room:
+
+```text
+payload header lengths:  12 bytes x5814,  28 bytes x29
+CaptureStats blobs:       0
+FrameIllumination blobs:  29        <- one per frame
+```
+
+A standard UVC payload header carrying PTS and SCR is exactly 12 bytes (2 + 4 + 6). Only a
+*longer* header can carry vendor data, so the length histogram is the whole question. 29 of
+them are 28 bytes, and the extra 16 decode as one MSXU blob:
+
+```text
+body  c9499c64 1d5c9c64 4305    06000000 10000000 01000000 00000000
+      PTS      SCR              id=6     size=16  flags=1  reserved
+                                FrameIllumination         -> ON
+```
+
+**Two results, and they point opposite ways:**
+
+| | |
+|---|---|
+| `CaptureStats` — exposure time | **absent.** Option B has no input on this firmware |
+| `FrameIllumination` — per-frame ON/OFF | **present**, in `DISABLED`, unprompted |
+
+### The decode is checked, not asserted
+
+The MSXU identifiers came from the spec by recall, which this wiki has been burned by
+before. So the tag is validated against something already known to be true: the emitter
+alternates every frame ([Probe 3](#probe-3--per-frame-mean-luma-the-decisive-test), four
+independent runs). If the decode is right, the tag must track the luma.
+
+```text
+frame  mean    tag          frame  mean    tag
+   4   64.71   OFF            17  100.21   ON
+   5   96.44   ON             18   75.39   OFF
+   6   71.89   OFF            ...
+   7  100.71   ON             29   99.82   ON
+
+mean(ON)  =  99.90   n=13
+mean(OFF) =  74.33   n=13
+separation = +25.58        26 frames, perfect alternation, zero disagreements
+```
+
+### What this licenses
+
+**Phase stops being inferred and becomes read.** `frame::classify` currently guesses which
+frames are emitter-lit by comparing each to its neighbours. [B18](11-bug-log.md#b18)
+recorded how thin that is in daylight: the ON series drifted 105 → 116 while OFF drifted
+92 → 102, leaving **3.5 levels of headroom on a 14-level amplitude**, and a slightly longer
+capture would have put a late OFF frame above an early ON one and mislabelled both
+silently. The firmware tag has no headroom to lose.
+
+This is a **robustness** win, not a daylight win, and it is not urgent — nothing currently
+fails because of it. It would be a change to `faciolock-camera` (surfacing the metadata
+stream) and `faciolock-vision` (accepting a supplied phase instead of classifying), and it
+needs its own decision entry, because taking phase from the device means trusting the
+device about something the pipeline currently derives for itself.
+
+### Method note: a read-back that agreed with itself
+
+The first run reported `UVCM` accepted, buffer 10240 bytes, and 12-byte headers only —
+i.e. "the firmware appends nothing". That was wrong, and the way it was wrong is worth
+recording.
+
+`struct v4l2_format` is a `u32 type` followed by a union. The union contains
+`struct v4l2_window`, which holds a pointer, so on x86-64 the union is 8-byte aligned and
+**four bytes of padding follow `type`**. Writing `dataformat` at offset 4 puts it in the
+padding: the driver reads zero, silently substitutes `UVCH`, and a read-back *at the same
+wrong offset* agrees with itself. Every number on screen was self-consistent and every one
+of them was about the wrong format.
+
+The arithmetic that catches it is in the ioctl: `_IOC_SIZE(VIDIOC_S_FMT)` is 208, and
+4 + 4 + 200 = 208 only if the padding is there. The spike now takes its sizes from the
+ioctl encoding rather than from a count of struct members.
+
+This is [B19](11-bug-log.md#b19)'s lesson in a third place — there a sidecar stated a
+parameter it never observed, here a read-back confirmed a value it never actually set.
+**A number that agrees with itself has not been measured.**
 
 ---
 

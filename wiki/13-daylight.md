@@ -128,23 +128,29 @@ detection and never reach the check.
   and passive texture checks are also needed"). That is a real result, reached for the price
   of one afternoon, and it is far cheaper to learn now than after PAM ships.
 
-### B. Read per-frame exposure from the metadata node — a day, fixes B20's input
+### ~~B. Read per-frame exposure from the metadata node~~ — **dead, measured 2026-08-09**
 
-Status: **inferred, not measured.** Flagged in [B20](11-bug-log.md#b20) consequence 3.
+Status: **refuted.** [10/Probe 8](10-hardware-probe.md#probe-8--the-metadata-node).
 
-`MSXU_CONTROL_METADATA` (selector 0x09) is supported on this camera and the kernel exposes
-`UVCM` on `/dev/video3`. **If** it carries `KSCAMERA_METADATA_CAPTURESTATS` with an exposure
-time, then ambient irradiance can be estimated as pedestal ÷ integration time — a quantity
-the AGC no longer sits between the attacker and the gate. That converts B20's AGC
-explanation from an inference off two columns into a per-frame reading, and it is the
-cleanest route to a gate input the attacker cannot pull down.
+The idea was that `MSXU_CONTROL_METADATA` might carry
+`KSCAMERA_METADATA_CAPTURESTATS` with an exposure time, which would let ambient irradiance
+be computed as pedestal ÷ integration time — a gate input the AGC, and therefore the
+attacker, no longer sits between.
 
-This is read-only. It is the safest experiment on this page.
+The node was streamed. Over 30 frames it produced **29 `FrameIllumination` blobs and zero
+`CaptureStats`**. This firmware does not report its exposure time, so the quantity option B
+was built on does not exist here. **B20 does not get fixed this way**, and the ambient gate
+stays what [13's blocker 2](#2-the-ambient-gate-keys-on-a-quantity-the-attacker-sets-b20)
+says it is: a UX hint, with `dark_ratio_max` load-bearing alone at 1.8×.
 
-A second prize if the node is readable: `ALT_FRAME_ILLUM` may populate per-frame
-illumination tags, which would give hardware ground truth for ON/OFF phase instead of
-`frame::classify` inferring it from luma. Robustness, not daylight, and not urgent
-([10/Probe 7](10-hardware-probe.md#probe-7--msxu-face-authentication-mode)).
+**The consolation prize turned out to be the real find.** The firmware tags every frame
+ON or OFF, in `DISABLED` mode, without being asked — hardware ground truth for the phase
+that `frame::classify` currently infers from luma. Validated against the strobe: 26 frames,
+perfect alternation, mean(ON) 99.90 against mean(OFF) 74.33, zero disagreements. That
+removes the 3.5-levels-of-headroom fragility [B18](11-bug-log.md#b18) recorded, and it is a
+**robustness** win rather than a daylight one. It needs its own decision entry before it is
+built, because taking phase from the device means trusting the device about something the
+pipeline currently derives for itself.
 
 ### C. Point the auto-exposure metering region at the face box — unexplored, and it needs its own probe
 
