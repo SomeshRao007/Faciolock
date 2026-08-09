@@ -4,6 +4,7 @@ members = [
     "crates/faciolock-camera",
     "crates/faciolock-daemon",
     "crates/faciolock-ipc",
+    "crates/faciolock-pam",
     "crates/faciolock-vision",
 ]
 
@@ -38,6 +39,7 @@ libc = "0.2"
 
 faciolock-camera = { path = "crates/faciolock-camera" }
 faciolock-ipc = { path = "crates/faciolock-ipc" }
+faciolock-pam = { path = "crates/faciolock-pam" }
 faciolock-vision = { path = "crates/faciolock-vision" }
 
 [profile.release]

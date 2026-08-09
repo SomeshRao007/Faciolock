@@ -334,6 +334,14 @@ name = "faciolock-ipc"
 version = "0.1.0"
 
 [[package]]
+name = "faciolock-pam"
+version = "0.1.0"
+dependencies = [
+ "faciolock-ipc",
+ "libc",
+]
+
+[[package]]
 name = "faciolock-vision"
 version = "0.1.0"
 dependencies = [

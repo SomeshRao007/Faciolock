@@ -15,15 +15,20 @@
 //! anyone who can reach the socket. Upgrade path if it is ever needed is a bounded pool,
 //! not a thread per peer.
 //!
-//! ## What is deliberately **not** here
+//! ## Access control
 //!
-//! `SO_PEERCRED`, remote-session rejection and request cancellation are Phase 3 (wiki/09),
-//! and they belong on this side of the socket, not in the PAM module. Until then the file
-//! mode is the whole access control: 0600, set through `umask` around `bind` so the socket
-//! never exists at a looser mode even briefly.
+//! Two layers, and the second exists because the first is one `chmod` away from being
+//! wrong. The socket is 0600 root-owned and only ever appears at its real path already at
+//! that mode ([`listen`]); and [`Peer`] checks `SO_PEERCRED` **before the request body is
+//! read**, so a non-root connection is closed having caused no parsing, no store lookup and
+//! no camera activity (wiki/03 R2).
+//!
+//! Remote-session rejection is the PAM module's job rather than this one's: `PAM_RHOST` and
+//! the SSH variables exist in the *caller's* process and never cross the socket.
 
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -35,10 +40,25 @@ use crate::Daemon;
 
 const BACKLOG: libc::c_int = 8;
 
+/// Bind, then `rename` into place — **not** `umask` around `bind`, and not `chmod` after it.
+///
+/// The socket must never be reachable at a looser mode, not even briefly, so `chmod` after
+/// `bind` is out. `umask` closes that window but opens a worse one: umask is *process*
+/// state, so for the duration of the `bind` every other thread's file creation inherits
+/// 0177 too. That is not hypothetical — it corrupted an unrelated test's directory to
+/// `drw-------` on the first run that called this function twice concurrently (B23).
+///
+/// Binding to a private name and renaming has neither problem. The socket is a filesystem
+/// inode; `rename` is atomic, so the path either does not exist or is a 0600 listening
+/// socket, with no third state. It also replaces the `remove_file` this used to need: a
+/// stale socket from a crashed run is overwritten by the rename rather than unlinked in a
+/// separate step that something else could win.
 pub fn listen(path: &Path) -> Result<UnixListener, String> {
-    // A socket file left by a previous run makes `bind` fail with `EADDRINUSE`. Phase 6's
-    // systemd socket unit removes this whole path by passing an already-bound fd.
-    let _ = std::fs::remove_file(path);
+    // Per-process, so two daemons racing to start cannot collide on the staging name.
+    let mut staging = path.as_os_str().to_os_string();
+    staging.push(format!(".bind.{}", std::process::id()));
+    let staging = std::path::PathBuf::from(staging);
+    let _ = std::fs::remove_file(&staging);
 
     let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
@@ -49,7 +69,7 @@ pub fn listen(path: &Path) -> Result<UnixListener, String> {
 
     let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    let bytes = path.as_os_str().as_bytes();
+    let bytes = staging.as_os_str().as_bytes();
     if bytes.len() >= addr.sun_path.len() {
         return Err(format!("socket path is longer than {} bytes", addr.sun_path.len() - 1));
     }
@@ -58,24 +78,38 @@ pub fn listen(path: &Path) -> Result<UnixListener, String> {
     }
     let len = (std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1) as libc::socklen_t;
 
-    // 0600 from the instant it exists. `chmod` after `bind` would leave a window at the
-    // process umask, and the window is the interesting part for anything watching /run.
-    let previous = unsafe { libc::umask(0o177) };
-    let bound =
-        unsafe { libc::bind(listener.as_raw_fd(), &addr as *const _ as *const libc::sockaddr, len) };
-    unsafe { libc::umask(previous) };
-    if bound < 0 {
-        return Err(format!("bind {}: {}", path.display(), std::io::Error::last_os_error()));
+    let cleanup = |r: Result<(), String>| {
+        // The staging inode outlives every failure below unless it is cleaned up here; a
+        // /run littered with half-bound sockets is its own small operational problem.
+        if r.is_err() {
+            let _ = std::fs::remove_file(&staging);
+        }
+        r
+    };
+
+    if unsafe { libc::bind(listener.as_raw_fd(), &addr as *const _ as *const libc::sockaddr, len) }
+        < 0
+    {
+        return Err(format!("bind {}: {}", staging.display(), std::io::Error::last_os_error()));
     }
-    if unsafe { libc::listen(listener.as_raw_fd(), BACKLOG) } < 0 {
-        return Err(format!("listen: {}", std::io::Error::last_os_error()));
-    }
+    cleanup(
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod {}: {e}", staging.display())),
+    )?;
+    cleanup(match unsafe { libc::listen(listener.as_raw_fd(), BACKLOG) } {
+        0 => Ok(()),
+        _ => Err(format!("listen: {}", std::io::Error::last_os_error())),
+    })?;
+    cleanup(
+        std::fs::rename(&staging, path)
+            .map_err(|e| format!("rename to {}: {e}", path.display())),
+    )?;
     Ok(listener)
 }
 
 /// Accept forever. Never returns on a per-connection failure — a peer that hangs up mid
 /// request must not take the daemon down with it.
-pub fn run(listener: &UnixListener, daemon: &mut Daemon) {
+pub fn run(listener: &UnixListener, daemon: &Daemon) {
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => handle(stream, daemon),
@@ -84,16 +118,120 @@ pub fn run(listener: &UnixListener, daemon: &mut Daemon) {
     }
 }
 
-fn handle(mut stream: UnixStream, daemon: &mut Daemon) {
+/// Who is on the other end, and whether they are still there.
+///
+/// `SO_PEERCRED` is the kernel's answer, not the peer's: it is recorded at `connect` time
+/// and cannot be forged by anything the peer sends. That is what makes it worth having on
+/// top of the file mode — wiki/03 R2's "the daemon never trusts a username from a non-root
+/// peer" needs a fact about the connection, and this is the only one available.
+pub struct Peer<'a> {
+    stream: &'a UnixStream,
+    uid: u32,
+    pid: i32,
+}
+
+impl<'a> Peer<'a> {
+    /// `std`'s `UnixStream::peer_cred` would be the ladder's answer here, but it is still
+    /// unstable (rust-lang#42839) and this crate builds on stable. `getsockopt` is what it
+    /// does anyway, and this file already reaches for `libc` to get `SOCK_SEQPACKET`.
+    fn of(stream: &'a UnixStream) -> Result<Peer<'a>, std::io::Error> {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Peer { stream, uid: cred.uid, pid: cred.pid })
+    }
+
+    /// wiki/03 R2: only root may ask. The socket's 0600 mode says the same thing, and this
+    /// is the layer that survives someone getting the mode wrong.
+    fn is_root(&self) -> bool {
+        self.uid == 0
+    }
+
+    /// Has the caller gone away?
+    ///
+    /// PAM gives up after its own deadline and the user types their password; the daemon
+    /// should not then spend a camera and 300 ms of inference answering nobody. `POLLRDHUP`
+    /// is the cheap way to ask — no read, no blocking, no state.
+    ///
+    /// ponytail: checked at stage boundaries, so an already-running burst still finishes
+    /// and the camera can stay held up to ~400 ms past a cancel (decision P3-b). Making the
+    /// capture itself interruptible needs a worker thread and a cancellation flag, and
+    /// nothing has yet measured that hold as a problem.
+    pub fn hung_up(&self) -> bool {
+        let mut poll = libc::pollfd {
+            fd: self.stream.as_raw_fd(),
+            events: libc::POLLRDHUP,
+            revents: 0,
+        };
+        let rc = unsafe { libc::poll(&mut poll, 1, 0) };
+        rc > 0 && poll.revents & (libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR) != 0
+    }
+
+    /// For the log. Phase 4's audit entry wants both fields.
+    pub fn describe(&self) -> String {
+        format!("pid {} uid {}", self.pid, self.uid)
+    }
+}
+
+/// wiki/04: "daemon-side hard timeout regardless of what the client asked for".
+///
+/// The request is one datagram already in flight by the time the connection is accepted, so
+/// this is not a budget for the peer to spend — it is the bound that stops a peer from not
+/// spending it. The daemon is serial, so a client that connects and never sends would
+/// otherwise park it in `read` forever and every later authentication would fail while the
+/// camera sat held. Only root can reach the socket, so this is robustness rather than
+/// access control; it is still two lines.
+const PEER_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `&UnixStream` reads and writes, so the connection can be borrowed by [`Peer`] for the
+/// whole call rather than moved into each I/O.
+fn handle(stream: UnixStream, daemon: &Daemon) {
+    // **Before the body is read.** A peer that is not root is closed here having caused no
+    // decode, no store lookup and no camera activity. No reply either: wiki/04 already
+    // defines socket EOF as `PAM_AUTHINFO_UNAVAIL` on the caller's side, and answering
+    // would turn the socket into an oracle that tells an unprivileged process whether a
+    // given user is enrolled.
+    let peer = match Peer::of(&stream) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("faciolockd: no peer credentials ({e}); closing");
+            return;
+        }
+    };
+    if !peer.is_root() {
+        eprintln!("faciolockd: refused {} — only root may ask", peer.describe());
+        return;
+    }
+    if let Err(e) = stream
+        .set_read_timeout(Some(PEER_IO_TIMEOUT))
+        .and_then(|()| stream.set_write_timeout(Some(PEER_IO_TIMEOUT)))
+    {
+        eprintln!("faciolockd: could not bound I/O on the connection ({e}); closing");
+        return;
+    }
+
     // One byte over the legal maximum, so an oversized datagram is *detectable*. `read`
     // truncates silently on `SOCK_SEQPACKET` and `std` exposes no `MSG_TRUNC`, so without
     // the extra byte a 200-byte message would arrive looking like a valid 37-byte one.
     let mut buf = [0u8; REQUEST_MAX + 1];
-    let n = match stream.read(&mut buf) {
+    let n = match (&stream).read(&mut buf) {
         Ok(0) => return, // peer hung up before sending anything
         Ok(n) => n,
+        // A timeout here is a peer that connected and said nothing. Closing is the whole
+        // recovery: the daemon goes back to accepting, and the next caller is answered.
         Err(e) => {
-            eprintln!("faciolockd: read: {e}");
+            eprintln!("faciolockd: {} sent nothing ({e}); closing", peer.describe());
             return;
         }
     };
@@ -106,18 +244,23 @@ fn handle(mut stream: UnixStream, daemon: &mut Daemon) {
 
     let started = Instant::now();
     let verdict = match Request::decode(&buf[..n]) {
-        Ok(req) => daemon.answer(&req),
+        Ok(req) => daemon.answer(&req, &peer),
         Err(e) => {
             eprintln!("faciolockd: malformed request: {e}");
-            Verdict::Deny
+            Some(Verdict::Deny)
         }
     };
+    // `None` is a cancelled request: the caller left, [`Daemon::answer`] logged it, and
+    // there is nobody to tell. Phase 4's rate limiter must not count these — a user who
+    // walks away from a lock screen has not failed an authentication.
+    let Some(verdict) = verdict else { return };
 
     let elapsed = started.elapsed().as_millis().min(u16::MAX as u128) as u16;
     // `std` sets `SIGPIPE` to `SIG_IGN`, so a peer that vanished mid-answer surfaces here
-    // as `EPIPE` rather than as a dead daemon.
-    if let Err(e) = stream.write_all(&Response::new(verdict, elapsed).encode()) {
-        eprintln!("faciolockd: write: {e}");
+    // as `EPIPE` rather than as a dead daemon. That is the same event as above, caught one
+    // stage later, and it is logged the same way.
+    if let Err(e) = (&stream).write_all(&Response::new(verdict, elapsed).encode()) {
+        eprintln!("faciolockd: {} left before the answer ({e})", peer.describe());
     }
 }
 
@@ -225,6 +368,46 @@ mod tests {
 
         let mode = std::fs::metadata(&path).expect("socket exists").permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "the socket must never be group- or world-reachable");
+
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Both halves of [`Peer`] against a real accepted connection, because both are
+    /// syscall behaviour rather than logic and a unit test of the logic would prove nothing.
+    ///
+    /// **The `uid == 0` accept path is not exercised here and cannot be**: the test process
+    /// is unprivileged, which is exactly why the refusal half tests itself. What covers the
+    /// accept path is the pam.d harness in wiki/09, where `sudo ./pam-try` connects as root.
+    #[test]
+    fn a_non_root_peer_is_refused_and_a_departed_one_is_noticed() {
+        let path = std::env::temp_dir().join("faciolockd-peer-test.sock");
+        let listener = listen(&path).expect("binds");
+
+        let fd =
+            unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) };
+        assert!(fd >= 0, "socket");
+        let client = unsafe { UnixStream::from_raw_fd(fd) };
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = path.as_os_str().as_bytes();
+        for (dst, src) in addr.sun_path.iter_mut().zip(bytes) {
+            *dst = *src as libc::c_char;
+        }
+        let len = (std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1) as libc::socklen_t;
+        let rc = unsafe {
+            libc::connect(client.as_raw_fd(), &addr as *const _ as *const libc::sockaddr, len)
+        };
+        assert_eq!(rc, 0, "connect: {}", std::io::Error::last_os_error());
+
+        let (server, _) = listener.accept().expect("accept");
+        let peer = Peer::of(&server).expect("SO_PEERCRED");
+        assert_eq!(peer.uid, unsafe { libc::getuid() }, "the kernel reports the real peer");
+        assert!(!peer.is_root(), "an unprivileged peer must be refused");
+
+        assert!(!peer.hung_up(), "the client is still connected");
+        drop(client);
+        assert!(peer.hung_up(), "a departed client must be detected, or the camera is held");
 
         drop(listener);
         let _ = std::fs::remove_file(&path);

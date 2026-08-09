@@ -28,11 +28,13 @@ mod store;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
 use faciolock_ipc::{Op, Request, Verdict};
 use faciolock_vision::{Burst, Config as VisionConfig, Pipeline, pipeline::enroll_template};
 
 use config::Config;
+use serve::Peer;
 use session::Session;
 
 const DEFAULT_CONFIG: &str = "/etc/faciolock/faciolockd.toml";
@@ -113,79 +115,125 @@ fn start(config_path: &Path) -> Result<Daemon, String> {
         vision.tier
     );
 
-    Ok(Daemon { session: Session::new(cfg.clone()), pipeline, cfg })
+    Ok(Daemon { session: Arc::new(Mutex::new(Session::new(cfg.clone()))), pipeline, cfg })
 }
 
 pub struct Daemon {
-    session: Session,
+    /// Shared with the startup warm thread, and the only mutable state the daemon has.
+    session: Arc<Mutex<Session>>,
     pipeline: Pipeline,
     cfg: Config,
 }
 
+/// A poisoned lock means the warm thread panicked mid-burst.
+///
+/// Recovering rather than propagating is deliberate: `Session` reopens its stream on the
+/// next fatal capture error anyway, so there is no invariant a panic could have broken that
+/// the next `burst` does not repair. Refusing every authentication for the life of the
+/// process because a warm-up panicked would be a worse failure than trying again.
+fn session_of(daemon: &Daemon) -> std::sync::MutexGuard<'_, Session> {
+    daemon.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl Daemon {
-    fn serve(mut self) -> ExitCode {
+    fn serve(self) -> ExitCode {
         let listener = match serve::listen(&self.cfg.socket) {
             Ok(l) => l,
             Err(e) => return fail(&e),
         };
         eprintln!("faciolockd: listening on {}", self.cfg.socket.display());
 
-        // The camera is warmed here rather than lazily, so the AGC settle frames land
-        // before the first authentication instead of inside it (wiki/06). Failing is fine
-        // and says so — a camera busy at startup is answered, not fatal.
-        match self.session.burst() {
-            Ok(b) => eprintln!(
-                "faciolockd: camera warm on {}, {} frames in {} ms",
-                self.session.device().map_or("(discovered)".into(), |d| d.display().to_string()),
-                b.meta.len(),
-                b.sensor_span().as_millis()
-            ),
-            Err(e) => eprintln!("faciolockd: camera unavailable at startup ({e}); will retry"),
-        }
+        // **Off the accept path, not on it.** The camera is still warmed eagerly, so the
+        // AGC settle frames land before the first authentication rather than inside it
+        // (wiki/06) — but `listen` has already bound by this point, so a client can connect
+        // at any moment, and doing the warm here on the main thread left it sitting in the
+        // kernel's backlog for a measured 1779 ms with nothing to observe. Worse, it made
+        // requests that need no camera at all wait for one: `NoEnrolment` answered in
+        // 1753 ms cold against 0.4 ms warm, for one absent file.
+        //
+        // On this thread the socket answers immediately and only work that genuinely needs
+        // the camera waits for it. That is also what makes the Phase 6 pre-warm agent work:
+        // its poke is answered while the warm is still running, which is the entire point
+        // of poking early.
+        let warming = Arc::clone(&self.session);
+        std::thread::spawn(move || {
+            let mut session = warming.lock().unwrap_or_else(|p| p.into_inner());
+            match session.burst() {
+                Ok(b) => eprintln!(
+                    "faciolockd: camera warm on {}, {} frames in {} ms",
+                    session.device().map_or("(discovered)".into(), |d| d.display().to_string()),
+                    b.meta.len(),
+                    b.sensor_span().as_millis()
+                ),
+                Err(e) => eprintln!("faciolockd: camera unavailable at startup ({e}); will retry"),
+            }
+        });
 
-        serve::run(&listener, &mut self);
+        serve::run(&listener, &self);
         let _ = std::fs::remove_file(&self.cfg.socket);
         ExitCode::SUCCESS
     }
 
     /// Answer one decoded request. The only entry point [`serve`] has into the pipeline.
-    pub fn answer(&mut self, req: &Request) -> Verdict {
+    ///
+    /// `None` means the caller hung up before the work finished, so there is no answer to
+    /// send and nothing to count.
+    pub fn answer(&self, req: &Request, peer: &Peer<'_>) -> Option<Verdict> {
         let user = req.username();
         match req.op {
-            Op::Auth => self.authenticate(user),
+            Op::Auth => self.authenticate(user, peer),
             Op::Status => {
                 let enrolled = store::load(&self.cfg.templates, user)
                     .inspect_err(|e| eprintln!("faciolockd: template store: {e}"))
                     .ok()
                     .flatten()
                     .is_some();
-                serve::status(enrolled)
+                Some(serve::status(enrolled))
             }
             Op::Enroll => {
                 eprintln!("faciolockd: refused enrolment over the socket for {user}");
-                serve::enroll_over_the_wire()
+                Some(serve::enroll_over_the_wire())
             }
         }
     }
 
-    fn authenticate(&mut self, user: &str) -> Verdict {
+    /// The two `hung_up` checks bracket the two expensive stages — ~400 ms of capture and
+    /// ~300 ms of inference. They are checks, not interrupts: a burst already in flight
+    /// finishes (decision P3-b).
+    fn authenticate(&self, user: &str, peer: &Peer<'_>) -> Option<Verdict> {
+        if peer.hung_up() {
+            eprintln!("faciolockd: {user}: cancelled by {} before any work", peer.describe());
+            return None;
+        }
+
         let template = match store::load(&self.cfg.templates, user) {
             Ok(Some(t)) => t,
             // Not enrolled is its own answer, and it is not a failed attempt.
-            Ok(None) => return Verdict::NoEnrolment,
+            Ok(None) => return Some(Verdict::NoEnrolment),
             Err(e) => {
                 eprintln!("faciolockd: template store: {e}");
-                return Verdict::Unavailable;
+                return Some(Verdict::Unavailable);
             }
         };
 
-        let burst = match self.session.burst() {
+        // The lock is held for the capture and released before the ~300 ms of inference,
+        // so a warm-up still running elsewhere is the only thing an authentication can
+        // queue behind, and only for as long as it holds the camera.
+        let burst = match session_of(self).burst() {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("faciolockd: capture for {user}: {e}");
-                return Verdict::Unavailable;
+                return Some(Verdict::Unavailable);
             }
         };
+
+        // Between the two costs. The camera is released by returning here, which is the
+        // part that matters — a caller that gave up must not keep the device from the next
+        // one, or from a video call.
+        if peer.hung_up() {
+            eprintln!("faciolockd: {user}: cancelled after capture, skipping inference");
+            return None;
+        }
 
         let vision = *self.pipeline.config();
         let frames = match Burst::from_planar(&burst.planar, burst.width, burst.height, &vision) {
@@ -193,7 +241,7 @@ impl Daemon {
             Err(e) => {
                 let verdict = faciolock_vision::Verdict::from(e);
                 eprintln!("faciolockd: {user}: {verdict:?}");
-                return serve::to_wire(&verdict);
+                return Some(serve::to_wire(&verdict));
             }
         };
 
@@ -210,7 +258,7 @@ impl Daemon {
             burst.discarded,
             burst.sensor_span().as_millis()
         );
-        serve::to_wire(&outcome.verdict)
+        Some(serve::to_wire(&outcome.verdict))
     }
 
     /// Enrol from the command line.
@@ -220,14 +268,14 @@ impl Daemon {
     /// this takes one burst and accepts whatever the liveness gate lets through — which is
     /// the same gate verification uses, deliberately, because enrolling from a photograph
     /// would poison the store permanently.
-    fn enroll_locally(mut self, user: &str) -> ExitCode {
+    fn enroll_locally(self, user: &str) -> ExitCode {
         // Reuse the wire's charset rule rather than re-implementing it: a username that
         // could never arrive over the socket must not be enrollable from argv either.
         if Request::new(Op::Enroll, user, 0).is_err() {
             return fail(&format!("{user:?} is not a usable username"));
         }
 
-        let burst = match self.session.burst() {
+        let burst = match session_of(&self).burst() {
             Ok(b) => b,
             Err(e) => return fail(&format!("capture: {e}")),
         };
