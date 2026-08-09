@@ -1,0 +1,20 @@
+[package]
+name = "faciolock-pam"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pam_faciolock"
+# `cdylib` is the module PAM `dlopen`s. `rlib` exists only so `cargo test` can link the
+# crate; it produces no shipped artifact. wiki/04's rule is about the *dependency* tree,
+# not the crate types.
+crate-type = ["cdylib", "rlib"]
+
+# **This list is a security claim and CI asserts it** (`tests/dependency_tree.rs`).
+# Everything here is compiled into a process that is root while it runs — `sudo`, `login`,
+# `sddm`. libpam's own functions are declared in `src/pam.rs` rather than taken as a crate,
+# which is why there is no `pam-sys` here.
+[dependencies]
+faciolock-ipc = { workspace = true }
+libc = { workspace = true }

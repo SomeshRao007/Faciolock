@@ -124,19 +124,65 @@ in config, not to decide silently.
 | Daemon resident, idle | ≤ 25 MB RSS | models mmap'd, buffers released |
 | During a match (SFace) | ≤ 120 MB peak | 37 MB model + runtime arena + frame buffers |
 | PAM module, in the root process | ≤ 200 KB | it is a socket client |
+| PAM module — **measured 2026-08-09** | **164 KB resident**, 353 KB on disk | built and weighed, Phase 3 |
 
 The PAM module figure is the important one and it is the direct consequence of the
 `libc`-only dependency rule in [04](04-architecture.md#crate-layout). Every process
 that authenticates a user — including `sudo`, invoked constantly — pays it.
 
+**It holds, and the two numbers disagree for a reason worth writing down.** The built
+`pam_faciolock.so` is 353 KB stripped — 76% over the budget if disk size were the metric —
+but only **164 KB** of it is ever resident after `dlopen`, which is the number this row was
+always about and the one [its measurement method](#how-each-number-gets-measured)
+specifies. The gap is `std`'s backtrace symbolizer: `gimli`, `addr2line` and `miniz_oxide`
+account for ~200 KB of DWARF-parsing code that runs only when a panic prints a backtrace,
+so those pages are never faulted in. Method: `dlopen` the module into a process that has
+already loaded libpam, then sum `Rss` over its mappings in `/proc/self/smaps`.
+
+Removing it from the binary is not available on stable Rust: it needs `-Z build-std`, and
+the other lever — `panic = "abort"` — is **forbidden here**, because the module's fail-closed
+guarantee is a `catch_unwind` at the FFI boundary ([03](03-pam-and-security.md)) and
+`abort` would turn a bug in the module into a killed `sudo` instead of a password prompt.
+`opt-level = "z"` + fat LTO were measured and returned 4 KB, which does not pay for a
+second build profile.
+
 Idle CPU: **0%**, by construction. No polling, no timer, no background thread. This
 is what socket activation buys and it is worth more than any micro-optimisation.
+
+## Cold start — measured 2026-08-09, found by the Phase 3 harness, fixed the same day
+
+The harness's first authentication answered `NoEnrolment` — one absent file, no camera — in
+**1753 ms**, and the same call took **0.4 ms** immediately after. Measured directly:
+
+```text
+                          before             after
+exec -> socket bound      377 ms             377 ms      model load + SHA256 of 39 MB
+     -> daemon accepts   2156 ms             378 ms
+     wait after connect  1779 ms               0 ms
+```
+
+`Daemon::serve` bound the socket, **then** warmed the camera on the same thread, and only
+then accepted. A client connecting in between sat in the kernel's backlog with nothing to
+observe — and every request paid it, including the ones that never touch a camera.
+
+The warm now runs on its own thread behind the `Session` mutex. The socket answers
+immediately and only work that genuinely needs the camera waits for it; the daemon log
+proves the ordering by recording a peer refusal *before* the warm completes. That also
+restores the point of the pre-warm agent above: its poke gets answered while the warm is
+still running, which is the entire reason for poking early.
+
+What this does **not** change: an authentication arriving mid-warm still waits for the
+camera, because there is one camera. It waits on the mutex, where the client is connected
+and its deadline is running, instead of unaccepted in a queue.
+
+Still the number to watch at Phase 6, where socket activation makes cold start the normal
+first unlock: model load 377 ms + camera warm + the authentication itself.
 
 ## Disk / install footprint
 
 | Item | Size |
 |---|---|
-| `pam_faciolock.so` | ~300 KB |
+| `pam_faciolock.so` | **353 KB measured** (was estimated ~300 KB) |
 | `faciolockd` | ~25 MB (Rust + `tract` kernels, stripped; measured on the spike binary) |
 | `faciolockctl` | ~2 MB |
 | YuNet | 85 KB |

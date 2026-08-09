@@ -96,6 +96,22 @@ Splitting the models out matters: it keeps the license accounting clean, lets a
 security update to the daemon ship without re-shipping 37 MB, and lets someone swap
 in a different model package.
 
+### One build-dependency, and a note for whoever writes `debian/rules`
+
+`libpam-faciolock` needs **`libpam0g-dev`** in `Build-Depends`. The module declares
+libpam's four functions itself rather than taking a crate for them — that is what keeps
+`cargo tree -p faciolock-pam` at exactly `libc` + `faciolock-ipc`, which is the claim
+[04](04-architecture.md#crate-layout) makes and Phase 3 asserts in a test — but it still
+links against libpam so the `.so` carries a `DT_NEEDED` for it. Without one, the module
+resolves `pam_get_user` from whatever the loading application happened to put in the global
+symbol scope, which is *usually* libpam and is not guaranteed to be.
+
+`crates/faciolock-pam/build.rs` passes `-l:libpam.so.0` rather than `-lpam`, because
+`-lpam` needs the `libpam.so` development symlink and the reference machine does not have
+`libpam0g-dev` installed. A package build does, so `debian/rules` may set the linker
+argument to plain `-lpam`; both produce the same `DT_NEEDED: libpam.so.0`. Nothing else
+about the module has a build-time dependency.
+
 Rust in Debian is the known-annoying part: the archive wants `librust-*-dev` source
 packages for every crate, or an explicit vendoring exception. Realistic sequencing:
 

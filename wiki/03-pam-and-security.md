@@ -55,6 +55,18 @@ In Rust this means:
 - no `?` propagating to a default-success value; the success value is constructed in
   one place only.
 
+**Built in Phase 3** as `crates/faciolock-pam`. The single construction site is `code_for`,
+and two tests hold it: one asserts that no verdict but `Allow` produces `PAM_SUCCESS`, the
+other that `code_for` and `faciolock_ipc::Verdict::is_allow` — the daemon's own notion of
+success — cannot drift apart. `RateLimited` deliberately returns the same code as `Deny`:
+distinguishing them tells an attacker whether to keep going.
+
+The `panic = "abort"` prohibition has a second consequence now that the module is built and
+weighed. It is also the only lever that would bring the binary under
+[06](06-performance-budget.md)'s size line, and it stays off the table: the resident
+footprint is inside budget anyway, and trading the fail-closed guarantee for disk space
+would be trading the property this section is about.
+
 ### Stack placement
 
 We ship a `/usr/share/pam-configs/faciolock` profile so `pam-auth-update` installs it
@@ -124,6 +136,20 @@ authenticate root and reading back a yes.
 Concretely: the socket is mode `0600` owned by root, so only root can connect at all;
 `SO_PEERCRED` is a second, in-band check so a future permission mistake is not
 instantly fatal.
+
+**Built in Phase 3, and one detail is worth stating because it is not the obvious
+choice: a refused peer gets no reply at all.** `serve::handle` reads the peer credentials
+before the request body, and a `uid != 0` connection is closed having caused no decode, no
+template lookup and no camera activity. Answering — even `Deny` — would make the socket an
+oracle: an unprivileged process could ask "is `root` enrolled?" and read the difference
+between `Deny` and `NoEnrolment`. Closing says nothing, and wiki/04 already defines socket
+EOF on the caller's side as `PAM_AUTHINFO_UNAVAIL`, so the honest client's behaviour is
+unchanged.
+
+The mode and the credential check are genuinely independent layers, which
+[B23](11-bug-log.md#b23) is a small demonstration of: the mechanism that had been buying the
+0600 turned out to have a scope nobody chose, and the credential check is what meant that
+was a tidiness problem rather than a security one.
 
 ### R3 — Verdicts are not transferable
 

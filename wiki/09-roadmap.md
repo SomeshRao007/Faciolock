@@ -112,20 +112,113 @@ pipeline change and needs its own decision entry rather than a quiet re-open of 
 
 ## Phase 3 — PAM module & IPC (week 4)
 
-The security-critical week.
+The security-critical week. **Built 2026-08-09**, and taken deliberately out of order:
+Phase 2's criterion 2 is blocked on recordings that can only be made after dark, and this
+is the one phase that needs no camera at all.
 
-- `faciolock-ipc`: fixed-layout binary protocol, hard size caps
-- `faciolock-pam` cdylib: `pam_sm_authenticate` + `pam_sm_setcred`
-- `catch_unwind` at the FFI boundary; single `PAM_SUCCESS` construction site
-- Remote-session rejection (`PAM_RHOST`, `SSH_*`) before any IPC
-- `SO_PEERCRED` check before reading the request body
-- Cancellation: socket close → daemon aborts, releases camera, logs as cancelled
-  (must not feed the rate limiter)
-- **CI assertion: `cargo tree -p faciolock-pam` contains only `libc` + `faciolock-ipc`**
+- ~~`faciolock-ipc`: fixed-layout binary protocol, hard size caps~~ — **done in Phase 2**
+- `faciolock-pam` cdylib: `pam_sm_authenticate` + `pam_sm_setcred` — **done**
+- `catch_unwind` at the FFI boundary; single `PAM_SUCCESS` construction site — **done**,
+  and the single site is held by two tests, one of which cross-checks it against
+  `faciolock_ipc::Verdict::is_allow` so the module's rule and the daemon's cannot drift
+- Remote-session rejection (`PAM_RHOST`, `SSH_*`) before any IPC — **done**
+- `SO_PEERCRED` check before reading the request body — **done**, and a refused peer gets
+  **no reply at all**, because answering would tell an unprivileged process whether a given
+  user is enrolled ([03](03-pam-and-security.md#r2--the-daemon-decides-who-you-are-the-pam-module-states-who-you-claim-to-be))
+- Cancellation: `POLLRDHUP` at the stage boundaries, logged as cancelled, no reply — **done**
+- **CI assertion: `cargo tree -p faciolock-pam` contains only `libc` + `faciolock-ipc`** —
+  **done as a test**; there is no CI in the repository yet to run it
+
+Two things the build settled that the plan did not anticipate:
+
+- **The 200 KB module budget holds, but not on disk.** 353 KB stripped, **164 KB
+  resident** — the gap is `std`'s backtrace symbolizer, never touched, never paged in.
+  [06](06-performance-budget.md#memory-budget) has the method and why `panic = "abort"`
+  stays off the table.
+- **libpam is linked, not depended on.** The four functions the module calls are declared
+  by hand, so the dependency tree stays at `libc` + `faciolock-ipc` while the `.so` still
+  carries a `DT_NEEDED` for `libpam.so.0` ([07](07-desktop-and-packaging.md#packaging-plan)).
+
+Two hang bugs were caught in review before any of this was committed, both of them the
+failure mode [03](03-pam-and-security.md) ranks first — an unusable lock screen:
+
+- The client set its socket timeouts **after** `connect`. An `AF_UNIX` `connect` against a
+  listener whose backlog is full does not fail, it sleeps; a daemon wedged in a stuck
+  camera ioctl stops accepting, eight queued clients fill `BACKLOG`, and the ninth blocks
+  with no deadline on it. Fixed by setting the timeouts before `connect`, where
+  `SO_SNDTIMEO` bounds the sleep. `a_full_backlog_times_out_instead_of_blocking_forever`
+  hangs indefinitely against the old ordering, which is how it was confirmed rather than
+  assumed.
+- The **daemon** had no read timeout on an accepted connection. It is serial, so one root
+  peer that connected and sent nothing parked it forever. Now bounded at 2 s, which is
+  wiki/04's "daemon-side hard timeout regardless of what the client asked for" applied to
+  the stage it had been missing from.
+
+And [B23](11-bug-log.md#b23) came out of it: the socket's 0600 was being bought with a
+*process-global* `umask`, which a second concurrent caller turned into a corrupted
+directory somewhere else entirely.
 
 **Exit:** `sudo` authenticates by face on the reference machine. Every failure path
 verified to fall through to the password prompt. Daemon killed mid-auth → password
 prompt, no hang.
+
+**Status against that criterion.** The failure paths are demonstrated; the success path is
+not, and cannot be until there is an enrolment, which needs the camera.
+
+**Observed** means someone ran it and read the output. **Pending** means the check is
+written and has not been run. The distinction is [B19](11-bug-log.md#b19)'s lesson and it
+is cheap to keep.
+
+| Leg | State |
+|---|---|
+| Non-root peer → refused by `SO_PEERCRED`, no reply | **observed**, against the real daemon and without root: an unprivileged client sending a well-formed `Op::Auth` gets `ECONNRESET`, and the daemon logs `refused pid 27608 uid 1000 — only root may ask`. The camera is never touched and nothing is written to the socket |
+| Client survives every hostile reply — garbage, oversized, truncated, wrong version, silence, a full backlog | **observed**, `cargo test -p faciolock-pam`, against real kernel sockets rather than a mock |
+| Module loads under a real libpam, out of a real pam.d file | **observed** — `/etc/pam.d/faciolock-test` + `tools/pam-try.c`, 10 checks, 10 passed |
+| Daemon absent → `PAM_AUTHINFO_UNAVAIL` | **observed**, 0.3 ms — `connect` fails, nothing to wait for |
+| Not enrolled → `PAM_USER_UNKNOWN` | **observed**, and the camera is never opened |
+| Remote session → refused **before** any IPC | **observed**, 0.2–0.4 ms, and the daemon's log did not grow by a line while it was up and demonstrably reachable — which is the only way to show an absence |
+| Daemon gone between requests → no hang | **observed**, 0.4 ms, `ECONNREFUSED`. A kill *during* a request needs a slow request, so it needs an enrolment; the mechanism is covered by the client's EOF and timeout tests |
+| Daemon's 2 s read timeout on a silent root peer | **observed** — `pid 28726 uid 0 sent nothing (EAGAIN); closing`, and the next request was answered normally. It cannot be unit-tested: the timeout is set after the `is_root` gate and tests run as uid 1000 |
+| **`sudo` authenticates by face** | **not done — needs enrolment (camera) and a separate approval to touch the sudo stack** |
+
+The last row is the phase exit and it stays open. What is left in it is not code.
+
+Every `PAM_AUTHINFO_UNAVAIL` above was matched against the module's own `debug` line in the
+journal, so each one is the failure it claims to be rather than a shared code: `No such
+file or directory` for the absent daemon, `Connection reset by peer` for the `SO_PEERCRED`
+refusal, `refusing a remote session (SSH_CONNECTION)` and `(SSH_TTY)` with no socket
+touched, `Connection refused` for the stale socket.
+
+### The harness found a 1.8 s cold-start stall, which is now fixed
+
+Its first authentication took **1753 ms** to answer `NoEnrolment` — an operation that
+touches no camera and reads one absent file, and that measured **0.4 ms** on the very next
+call. Nothing was looking for this; it came out of a timing column added so the "fast"
+claims in the table above would be checkable.
+
+```text
+                          before             after
+exec -> socket bound      377 ms             377 ms
+     -> daemon accepts   2156 ms             378 ms
+     wait after connect  1779 ms               0 ms
+```
+
+`Daemon::serve` bound the socket, **then** warmed the camera on the same thread, then
+accepted. Anything connecting in between was queued in the kernel with nothing to observe —
+the same behaviour that made the connect deadline necessary, arriving from the other side.
+
+The warm moved to its own thread behind the `Session` mutex. The socket answers
+immediately, only work that needs the camera waits for it, and the daemon log proves the
+order by recording a peer refusal *before* the warm finishes. An authentication arriving
+mid-warm still waits — there is one camera — but it waits connected, with its deadline
+running, rather than unaccepted.
+
+This mattered most for **Phase 6**, which it is now cheaper to build: socket activation
+makes cold start the normal first unlock, and the pre-warm agent
+([04](04-architecture.md#idle-cost-how-zero-rss-when-idle-works)) only works if a poke can
+be answered *while* the camera is warming. Under the old ordering it could not be.
+[06](06-performance-budget.md#cold-start--measured-2026-08-09-found-by-the-phase-3-harness-fixed-the-same-day)
+carries the numbers.
 
 ---
 

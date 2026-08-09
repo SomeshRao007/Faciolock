@@ -9,6 +9,7 @@ to fix.
 
 | # | Bug | Severity | Status |
 |---|---|---|---|
+| [B23](#b23) | The socket's 0600 was bought with a **process-global** `umask`, and an unrelated directory inherited it | medium | fixed by bind-then-rename; `umask` removed entirely |
 | [B22](#b22) | The AGC settle frames were discarded **twice**, leaving 1 frame of 6 | **high** | fixed at the daemon's config seam; found by the first end-to-end run |
 | [B19](#b19) | Corpus sidecars recorded the **requested** frame rate as if it were measured | medium | fixed; delivered rate is 12–15 fps, never 30 |
 | [B18](#b18) | Every strobe statistic is a **ratio**, and ambient IR saturates a ratio | **critical** | `classify` fixed; ambient **gate** shipped; threshold provisional |
@@ -29,6 +30,70 @@ to fix.
 | [B3](#b3) | `2>/dev/null` hid a missing binary as "no evidence" | medium | documented |
 | [B2](#b2) | Half the `/dev/videoN` nodes are not cameras | low | fixed |
 | [B1](#b1) | Dead conditional in `build_pairs` | trivial | removed |
+
+---
+
+## B23 — A security control implemented as global process state {#b23}
+
+**Severity: medium**, and the severity is the interesting part: the *socket* was always
+correct, on every run, in production and in tests. What broke was a directory belonging to
+something else entirely.
+
+### What happened
+
+Phase 2 wanted the socket at 0600 from the instant it exists, because `chmod` after `bind`
+leaves a window at the process umask. The fix was to set the umask around the `bind`:
+
+```rust
+let previous = unsafe { libc::umask(0o177) };
+let bound = unsafe { libc::bind(...) };
+unsafe { libc::umask(previous) };
+```
+
+That reasoning is right and the window it closes is real. But `umask` is not a property of
+the call, it is a property of the **process**, and for the duration of that `bind` every
+other thread creating a file or a directory inherits it too.
+
+Phase 3 added a second test that calls `listen()`. `cargo test` runs tests in parallel
+threads, so `store::save`'s `create_dir_all` landed inside the window and the template
+directory was created at `0777 & ~0177` = `drw-------`. A directory without its execute bit
+cannot be opened, so the next line failed with:
+
+```text
+/tmp/faciolockd-store-test/csr.tpl: Permission denied (os error 13)
+```
+
+Two store tests failed, in a file nobody had touched, naming a permission error on a
+directory the test had just created itself. The suite had passed minutes earlier with the
+same code — one `listen()` call was a narrow enough window to usually win the race.
+
+### The fix
+
+`bind` to a private staging name, `chmod` it, `listen`, then `rename` into place. `rename`
+is atomic, so the real path is either absent or a 0600 listening socket, with no third
+state — a stronger guarantee than the umask version gave, since the staging inode is never
+at the real path at all. No global state is touched, so nothing else in the process can
+observe it. It also subsumes the `remove_file` that used to be needed for a stale socket
+from a crashed run: the rename replaces it, rather than an unlink that something could win.
+
+### Why this is worth a numbered entry
+
+It never affected the daemon. `listen()` is called once, at startup, before any thread
+exists, so the socket was 0600 and the umask was restored microseconds later. Every
+production run was correct.
+
+**The bug is that the correctness was ambient rather than local.** The single-threaded
+caller was load-bearing and nothing said so; the guarantee held because of a fact about the
+program elsewhere. That is the class of thing that survives every review — the code is
+right, the comment explaining it is right — and then breaks when the surrounding program
+changes in a way that has nothing to do with sockets. Here the change was a *test*, which
+is the cheapest possible way to find out.
+
+The lesson is narrower than "avoid global state": a control that borrows a process-wide
+setting to achieve a local guarantee has a scope its author did not choose. When a
+file-scoped mechanism exists — `rename`, `O_TMPFILE`, `fchmod` before the name is
+published — it is the one to reach for, even at a few more lines, because its blast radius
+is the thing it is about.
 
 ---
 

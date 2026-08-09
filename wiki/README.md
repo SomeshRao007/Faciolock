@@ -3,7 +3,9 @@
 IR face authentication for Linux via PAM. Rust. Built to look and behave like a
 platform component, not an add-on.
 
-**Status: Phase 1 built.** `crates/faciolock-vision` takes frames in and produces a
+**Status: Phases 1 and 3 built; Phase 2 open on one criterion.**
+
+**Phase 1.** `crates/faciolock-vision` takes frames in and produces a
 verdict out — liveness, YuNet detection, alignment, SFace embedding, k-of-n matching — with
 no camera, no sockets and no PAM. 78 tests, of which the ones that need neither the
 recordings nor the models always run. Detection and alignment are pinned against
@@ -41,6 +43,35 @@ not see it, because the seam between two correct crates has no corpus.
 The frame burst is now **measured at 404 ms** against a 130 ms estimate
 ([B19](11-bug-log.md#b19)), so the warm path is ~673 ms against a 400 ms target and
 [06](06-performance-budget.md) is restated.
+
+**Phase 3 is built, out of order and on purpose** — it is the only phase that needs no
+camera, and Phase 2's remaining criterion is blocked on recordings that can only be made
+after dark. `crates/faciolock-pam` is a cdylib whose dependency tree is exactly `libc` and
+`faciolock-ipc`, asserted by a test; libpam's own functions are declared by hand rather
+than taken as a crate, so the `.so` links against libpam without depending on it. The
+daemon now checks `SO_PEERCRED` before it reads a request body and gives a non-root peer
+**no reply at all**. The 200 KB module budget in [06](06-performance-budget.md) holds —
+**164 KB resident**, against 353 KB on disk that is almost entirely `std`'s backtrace
+symbolizer and never paged in.
+
+**Every failure path is now observed through a real libpam** — 10 checks, 10 passed, each
+`PAM_AUTHINFO_UNAVAIL` matched against the module's own journal line so it is the failure
+it claims to be rather than a shared code. **The success path is not, and cannot be until
+there is an enrolment**, which needs the camera; that is the whole of what is left in the
+phase exit and it is not code.
+
+The run also produced a number nobody was looking for, from a timing column added only so
+the word "fast" would be checkable: the first request after a cold start waited **1779 ms**
+to be accepted, because the daemon bound the socket and then warmed the camera on the same
+thread. Every request paid it, including the ones that never touch a camera — a
+`NoEnrolment` answered in 1753 ms cold against 0.4 ms warm. The warm now runs on its own
+thread and the wait is **0 ms**. That was also quietly blocking Phase 6: the pre-warm agent
+only works if a poke can be answered *while* the camera warms
+([06](06-performance-budget.md#cold-start--measured-2026-08-09-found-by-the-phase-3-harness-fixed-the-same-day)). Two hang bugs were
+caught in review first, both of them an unusable lock screen: the client set its socket
+timeouts after `connect`, which does not return promptly when a listener's backlog is full,
+and the daemon had no read timeout at all on an accepted connection. [B23](11-bug-log.md#b23)
+also fell out of it — the socket's 0600 was being bought with a *process-global* `umask`.
 
 ## Index
 
@@ -95,6 +126,9 @@ under 400 ms wall-clock, zero RSS when idle.
 | P2-e | **Strobe statistics move to the difference domain**; a ratio saturates against ambient IR ([B18](11-bug-log.md#b18)) | 2026-08-06 |
 | P2-f | **Ambient gate at floor 0.04**, before any biometric work. Above it the answer is "cannot verify", not a guess | 2026-08-06 |
 | P2-g | **`Environment` is exempt from the failure budget** — weather must not disable face unlock | 2026-08-06 |
+| P3-a | **The socket path is a pam.d argument and never an environment variable.** The module runs as root in a process whose environment an unprivileged caller influences; a path taken from the environment would let that caller point it at a daemon they wrote, which answers `Allow`. A pam.d file is root-owned, which is the whole reason the knob is safe there | 2026-08-09 |
+| P3-b | **Cancellation is checked at stage boundaries, not enforced mid-stage.** `POLLRDHUP` before the burst and before inference; an in-flight burst still finishes, so the camera can stay held ~400 ms past a cancel. Interrupting capture needs a worker thread and a flag, and nothing has measured that hold as a problem | 2026-08-09 |
+| P3-c | **PAM-side deadline 3 s, applied to connect, write and read separately.** Above the daemon's own worst case (1500 ms capture + ~350 ms inference) so the daemon gives up first. It bounds `connect` too, which is not decorative — an `AF_UNIX` `connect` sleeps rather than fails when the listener's backlog is full | 2026-08-09 |
 | P2-h | **No RGB camera in v1.** Measured: it cannot see the emitter (SNR 0.85 vs the IR camera's 1,500–15,000), so it cannot do strobe liveness. AND-ing it in would rely on a branch that reads *true* for attackers in daylight; OR-ing it in lets a photo unlock. Deferred to v2 as an explicit opt-in tier | 2026-08-06 |
 
 Still open: Q4 (IPC), Q5 (TPM timing), Q9 (name), and whether the real recordings are ever
