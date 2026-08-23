@@ -84,7 +84,31 @@ falloff reads geometry and cannot see injected IR.
 
 ### A. Record a printed face — hours, one errand, unblocks everything else
 
-Status: **not done, and it is the only item on this list that is on the critical path.**
+Status: **done 2026-08-19, in the dark. The answer is negative, and the daylight half of the
+errand is still outstanding.**
+
+A magazine cover was recorded at 23:45 IST with a same-session live control — pedestal 0.000
+on all five takes, so this is the *nocturnal* set. The plan had it as the cross-check and the
+bright-room set as the main event; they arrived in the opposite order.
+
+What it settled, at night: **falloff CV does not separate a live face from a flat print.**
+0.2733 against a worst live of 0.2661 — above it. A printed face clears every enforced
+liveness check
+([B24](11-bug-log.md#b24)). Outcome 2 of the two listed at the end of this section, which
+means falloff alone is insufficient and this page's central question does not have the cheap
+answer.
+
+What it did **not** settle: anything about daylight prints, because there are none. And
+`ctr/edge`, which appeared to separate — 0.876–0.918 for prints against 1.446–1.774 for live —
+turns out to separate by ~0.2% rather than 0.53 once measured at the burst length the daemon
+actually uses, on one print object and one human subject ([B24](11-bug-log.md#b24)). No
+threshold was added, advisory or otherwise.
+
+**The remaining errand, re-ranked by what the review actually found:** a **second live
+subject** first — it needs no printer, no errand and no purchase, and every live number in
+this project comes from one person's head. Then a second print object, propped rather than
+hand-held and sized to match the live control's box. Then the whole set in the bright room,
+which is the only thing here that speaks to daylight.
 
 [B21](11-bug-log.md#b21) is the correction that matters here. **It supersedes B18's
 recording list**, which said "no printer and no printed face are required — any flat object
@@ -108,12 +132,23 @@ poster, a product box with a face on it, a page from a print shop, a book jacket
 
 The set that closes it, all in the high-ambient room, via `tools/record-negatives.sh`:
 
-| take | what it settles |
-|---|---|
-| flat printed face | the calibration point. The load-bearing one |
-| the same print, curved over a mug or a head-shaped form | the presentation designed to *manufacture* falloff — the likeliest to reach the live band |
-| the print **plus** the IR remote | the only capture that speaks to standing `dark_ratio_max` down |
-| the same flat print at night | cross-check: CV appears to *rise* with ambient, the direction that could push a flat surface past a nocturnally-set floor |
+| take | label | what it settles |
+|---|---|---|
+| live control, this session's room | `live_bright_control` | pins the live band for *today's* light, so the flat takes are compared against a same-session baseline |
+| flat printed face | `flat_printed_face` | the calibration point. The load-bearing one |
+| the same print, curved over a mug or a head-shaped form | `nonflat_printed_face_curved` | the presentation designed to *manufacture* falloff — the likeliest to reach the live band |
+| the print **plus** the IR remote | `attack_flat_floodlight` | the only capture that speaks to standing `dark_ratio_max` down |
+| tablet at full brightness | `spoof_tablet_bright` | costs 90 s, calibrates nothing — the corpus has no daylight screen capture |
+| the same flat print at night | `flat_printed_face`, re-run via `record-negatives.sh 2` | cross-check: CV appears to *rise* with ambient, the direction that could push a flat surface past a nocturnally-set floor. A separate session — one ambient description per matched set |
+
+The prefixes are load-bearing, not cosmetic: `ambient_corpus.rs` scores `flat_*` and
+`nonflat_*` as separate classes, because pooling a ceramic mug into the flat margin is how
+the 2026-08-09 run reported a number that meant nothing ([B20](11-bug-log.md#b20)).
+
+**A colour print may simply not be detected.** Many CMYK inks are weak or near-transparent
+at the emitter's NIR wavelength, so a magazine face can wash out and return no box. That is
+a real outcome, not a failed errand — a print refused at *detection*, the way screens
+already are — and the test reports which box each row used rather than assuming.
 
 A screen cannot substitute. `spoof_phone` reads `no face`, because the IR camera sees the
 emitter reflected off the glass rather than the displayed image — screens are refused by

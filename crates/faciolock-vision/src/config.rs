@@ -103,18 +103,33 @@ pub struct LivenessConfig {
     /// Reject when the spatial falloff of D across the face box is *below* this --
     /// i.e. when the response is suspiciously uniform.
     ///
-    /// Deliberately a **degenerate-flatness floor, not a separating threshold**.
+    /// Deliberately a **degenerate-flatness floor, not a separating threshold** — and
+    /// as of 2026-08-19 it is known that no separating threshold exists on this statistic.
     ///
     /// A live face is a curved diffuse reflector so D varies strongly across it; a flat
     /// print reflects near-uniformly. The physics is sound and the arithmetic is
-    /// unit-tested against synthetic domed-versus-flat data, but the *separation* between
-    /// a real face and a real print has never been measured — wiki/09 calls that "the one
-    /// genuinely unproven claim in the project" and it stays unproven until a
-    /// `spoof_print_*` recording exists.
+    /// unit-tested against synthetic domed-versus-flat data. **The physics is not what
+    /// this measures on a real print.** A magazine cover held flat at ~40 cm reads
+    /// **0.2733**, against a worst live face of **0.2661** — the print is *above* the live
+    /// minimum, so the classes interleave and no value of this threshold admits every live
+    /// capture while rejecting the print (wiki/11 B24).
     ///
-    /// So this claims only what it can prove. Live falloff CV over the **detected face
-    /// box** (which is B7's closure — the Phase 0 centre crop was measuring a
-    /// subject-versus-background gradient and gave 0.31 and 0.64 for the same pose):
+    /// The reason is albedo, and wiki/11 B21 called it before the recording existed: a
+    /// printed face carries dark brows and a bright forehead, and ink enters the ON−OFF
+    /// difference identically to shape, because this statistic cannot tell them apart. It
+    /// measures *variance*, and a photograph of a curved object has the variance of a
+    /// curved object.
+    ///
+    /// So this stays a floor, it stays enforced because it costs zero false rejects and
+    /// does catch a degenerate presentation, and **it must not be described as an
+    /// anti-spoofing check**. There is deliberately no companion threshold here that is:
+    /// [`crate::liveness::centre_edge_ratio`] separates the classes but by ~0.2% at the
+    /// burst length the daemon uses, on n=1 print and n=1 subject, so no field was added
+    /// rather than adding an advisory one that would read as progress in the report.
+    ///
+    /// Live falloff CV over the **detected face box** (which is B7's closure — the Phase 0
+    /// centre crop was measuring a subject-versus-background gradient and gave 0.31 and
+    /// 0.64 for the same pose):
     ///
     /// ```text
     /// live_lit_frontal     0.3130    live_lit_glasses     0.2989
@@ -128,9 +143,7 @@ pub struct LivenessConfig {
     /// A perfectly flat synthetic presentation scores below 0.01. 0.05 sits ~5x under the
     /// worst honest capture and ~5x over a degenerate one: enforced, because it costs zero
     /// false rejects on everything measured, and it rejects a perfectly flat presentation.
-    /// **It does not claim to reject a printed photo.** Four captures, one subject, one
-    /// session — thinner evidence than B9's 65x margin, and the reason this is a floor
-    /// rather than a threshold.
+    /// **It does not reject a printed photo** — that is now measured, not merely unclaimed.
     pub falloff_cv_min: Threshold,
 
     /// Reject when consecutive OFF frames differ by more than this fraction of the

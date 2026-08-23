@@ -159,6 +159,8 @@ The harness's first authentication answered `NoEnrolment` — one absent file, n
 exec -> socket bound      377 ms             377 ms      model load + SHA256 of 39 MB
      -> daemon accepts   2156 ms             378 ms
      wait after connect  1779 ms               0 ms
+cold NoEnrolment through
+       a real PAM stack  1753 ms             0.6 ms      the harness, re-run
 ```
 
 `Daemon::serve` bound the socket, **then** warmed the camera on the same thread, and only

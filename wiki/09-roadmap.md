@@ -10,10 +10,21 @@ falloff test separates a live face from a flat print. Both are answerable in wee
 for near-zero cost, so they go in week 1. Everything after that is work we already
 know how to do.
 
-**Status:** the first is **settled** — `tract` runs both models, Q2 decided. The second
-is **not**, and is blocked twice over: no print sample, and the falloff test cannot be
-measured until detection provides a real face box ([B7](11-bug-log.md#b7)). That moves
-YuNet ahead of the liveness thresholds, which is a reordering of Phase 1.
+**Status: both are settled, and the second one came back negative.** `tract` runs both models,
+Q2 decided. And on 2026-08-19 a magazine cover finally supplied the print sample S5 had been
+waiting for since day one: **the falloff test does not separate a live face from a flat
+printed one.** The print reads CV 0.2733 against a worst live face of 0.2661 — above it, so
+no threshold exists at any value that admits every live capture and rejects the print
+([B24](11-bug-log.md#b24)). A printed face passes every enforced liveness check.
+
+That is the outcome S5 was written to allow ("or evidence that falloff alone is
+insufficient"), so Phase 0 exits rather than stalls, but it makes liveness an open design
+problem rather than a calibration one. `centre_edge_ratio` looked like the replacement —
+prints 0.876–0.918 against live 1.446–1.774 — and the separation is real but far thinner than
+it measured: the corpus test takes the worst of 41 pairs where the daemon judges 3, and per
+pair the print's best reading is 1.443 against the weakest live capture's worst of 1.446. A
+**~0.2% margin**, from one print object and one human subject ([B24](11-bug-log.md#b24)).
+**No threshold was taken, and liveness has no check that rejects a print.**
 
 Each phase has an **exit criterion**. A phase isn't done because the code is written;
 it's done when the criterion is demonstrated.
@@ -38,12 +49,20 @@ Throwaway code. Nothing here survives into the final tree except the corpus.
 - **S4 — Corpus recording.** Capture raw ON/OFF bursts of: live face (several angles,
   glasses on/off, lit room, dark room), phone screen, laptop screen, matte print,
   glossy print. **One afternoon of hardware exposure, reused forever.**
-- **S5 — Threshold spike.** Compute `D`, ON/OFF ratio, and spatial falloff over the
-  corpus. Plot the separation. **The one genuinely unproven claim in the project.**
+- **S5 — Threshold spike.** ~~Compute `D`, ON/OFF ratio, and spatial falloff over the
+  corpus. Plot the separation.~~ **Answered 2026-08-19, negatively.** Falloff CV does not
+  separate live from print — 0.2733 print against 0.2661 worst live, an interleave rather
+  than a margin ([B24](11-bug-log.md#b24)). The magazine-cover recording that settled it took
+  eight minutes and had been deferred since 2026-08-04.
 
-**Exit:** ~~a number for `tract` vs `ort`~~ **done**; a plot showing live-vs-print
-separation with a defensible threshold, or evidence that falloff alone is insufficient
-and passive texture checks are also needed — **not done, and not currently reachable.**
+**Exit: met, on its second branch.** ~~a number for `tract` vs `ort`~~ **done**; and the
+alternative the criterion explicitly allowed — "evidence that falloff alone is insufficient
+and passive texture checks are also needed" — is now in hand rather than the plot. The phase
+closes with a worse design position than it hoped for and an honest one, which is what an
+exit criterion phrased as a disjunction is for.
+
+**What it hands to Phase 1:** a liveness stage that contributes nothing against a printed
+face, and one measured candidate (`centre_edge_ratio`) to rebuild it around.
 
 ---
 
@@ -175,7 +194,7 @@ is cheap to keep.
 | Client survives every hostile reply — garbage, oversized, truncated, wrong version, silence, a full backlog | **observed**, `cargo test -p faciolock-pam`, against real kernel sockets rather than a mock |
 | Module loads under a real libpam, out of a real pam.d file | **observed** — `/etc/pam.d/faciolock-test` + `tools/pam-try.c`, 10 checks, 10 passed |
 | Daemon absent → `PAM_AUTHINFO_UNAVAIL` | **observed**, 0.3 ms — `connect` fails, nothing to wait for |
-| Not enrolled → `PAM_USER_UNKNOWN` | **observed**, and the camera is never opened |
+| Not enrolled → `PAM_USER_UNKNOWN` | **observed**, 0.6 ms cold, and the camera is never opened |
 | Remote session → refused **before** any IPC | **observed**, 0.2–0.4 ms, and the daemon's log did not grow by a line while it was up and demonstrably reachable — which is the only way to show an absence |
 | Daemon gone between requests → no hang | **observed**, 0.4 ms, `ECONNREFUSED`. A kill *during* a request needs a slow request, so it needs an enrolment; the mechanism is covered by the client's EOF and timeout tests |
 | Daemon's 2 s read timeout on a silent root peer | **observed** — `pid 28726 uid 0 sent nothing (EAGAIN); closing`, and the next request was answered normally. It cannot be unit-tested: the timeout is set after the `is_root` gate and tests run as uid 1000 |
@@ -201,7 +220,15 @@ claims in the table above would be checkable.
 exec -> socket bound      377 ms             377 ms
      -> daemon accepts   2156 ms             378 ms
      wait after connect  1779 ms               0 ms
+harness, cold NoEnrolment
+       through real PAM  1753 ms             0.6 ms
 ```
+
+The last row is the same harness re-run after the fix, so the end-to-end path confirms the
+socket-level measurement rather than only agreeing with it in principle. The daemon log
+settles the ordering by itself: `refused pid 30811 uid 1000` is written *before*
+`camera warm`, meaning the first four checks were all answered while the camera was still
+warming.
 
 `Daemon::serve` bound the socket, **then** warmed the camera on the same thread, then
 accepted. Anything connecting in between was queued in the kernel with nothing to observe —
@@ -290,7 +317,7 @@ face *and* password entry still works instantly while the camera is running.
 
 | Risk | Phase | Mitigation |
 |---|---|---|
-| Falloff test can't separate face from print | 0 | **Deferred 2026-08-04 by decision.** No print recorded, so this is not yet found at all. Mitigation if it materialises is unchanged — passive texture/reflectance checks, tighten to `ir-strobe`-only — but it would now land later than week 1, when it is more expensive. Accepted. |
+| **Falloff test can't separate face from print** | 0 | **MATERIALISED 2026-08-19, exactly as written.** Deferred on 2026-08-04, found fifteen days and three phases later for the price of one magazine cover: print CV 0.2733 against worst live 0.2661, and a flat printed face passes every enforced liveness check ([B24](11-bug-log.md#b24)). The staged mitigation is now the live work, and the obvious candidate is not yet usable: `centre_edge_ratio` does separate (prints 0.876–0.918 vs live 1.446–1.774) but the margin collapses to ~0.2% at the burst length the daemon actually uses, on n=1 print and n=1 subject. No threshold was added. The cost of the deferral is that every week it sat, the falloff design looked settled. |
 | ~~`tract` can't load the models~~ | 0 | **Retired.** `tract` loads YuNet and SFace. Q2 decided on `tract`. |
 | ~~EdgeFace weights not BSD-licensed~~ | 0 | **Materialised.** Weights are CC BY-NC-SA 4.0. SFace fallback taken as designed ([B10](11-bug-log.md#b10)). |
 | SFace training-data provenance also restricted | 0 | Unresolved. Upstream repo states no licence. Fallback is dlib's CC0 model. **Must clear before ITP.** |

@@ -1,0 +1,18 @@
+{
+  "label": "attack_flat_floodlight",
+  "recorded_utc": "20260819T181725Z",
+  "recorded_local": "2026-08-19T23:47:36+0530",
+  "ambient": "sitting in room, night time with rooom lights",
+  "device_bypath": "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:7:1.2-video-index0",
+  "device_resolved": "/dev/video2",
+  "width": 640,
+  "height": 360,
+  "pixel_format": "GREY",
+  "fps_requested": 30,
+  "fps_delivered": 12.12,
+  "elapsed_s": 7.420820899,
+  "frames_requested": 90,
+  "frames_actual": 90,
+  "bytes": 20736000,
+  "note": "flat magazine cover AND IR remote at sensor, button down"
+}

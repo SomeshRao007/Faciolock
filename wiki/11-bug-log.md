@@ -9,6 +9,7 @@ to fix.
 
 | # | Bug | Severity | Status |
 |---|---|---|---|
+| [B24](#b24) | **A flat printed face passes every liveness check.** `falloff_cv` cannot separate it — the print reads *above* the worst live face | **critical** | design finding, **open**. S5 answered on its bad-news branch. `centre_edge_ratio` does separate, but by ~0.2% at the burst length the daemon actually uses, from n=1 print and n=1 subject — no threshold taken. Liveness has **no** check that rejects a print |
 | [B23](#b23) | The socket's 0600 was bought with a **process-global** `umask`, and an unrelated directory inherited it | medium | fixed by bind-then-rename; `umask` removed entirely |
 | [B22](#b22) | The AGC settle frames were discarded **twice**, leaving 1 frame of 6 | **high** | fixed at the daemon's config seam; found by the first end-to-end run |
 | [B19](#b19) | Corpus sidecars recorded the **requested** frame rate as if it were measured | medium | fixed; delivered rate is 12–15 fps, never 30 |
@@ -30,6 +31,210 @@ to fix.
 | [B3](#b3) | `2>/dev/null` hid a missing binary as "no evidence" | medium | documented |
 | [B2](#b2) | Half the `/dev/videoN` nodes are not cameras | low | fixed |
 | [B1](#b1) | Dead conditional in `build_pairs` | trivial | removed |
+
+---
+
+## B24 — A flat printed face passes every liveness check {#b24}
+
+**Severity: critical.** This is the answer to Phase 0's S5, the one genuinely unproven claim
+in the project, and it is the answer the plan was written to allow but hoped not to get.
+
+### What happened
+
+A magazine cover with a printed face, pressed flat against a rigid backing and held at ~40 cm,
+was recorded on 2026-08-19 at 23:45 IST along with a same-session live control. Both went
+through `liveness_corpus`:
+
+```text
+capture                     pairs   face dark(worst)   D(worst)   falloff    motion  verdict
+flat_printed_face              42    yes     2.75e-6    49.7947    0.2733    0.0000  allow
+nonflat_printed_face_curved    42    yes     1.73e-6    41.5470    0.1709    0.0000  allow
+live_bright_control            42    yes     1.83e-5    54.0582    0.3281    0.0000  allow
+```
+
+The print is **detected** by YuNet — so the CMYK-transparent-in-NIR worry does not
+materialise on this stock — and it then clears every enforced check: `dark_ratio_max` by
+three orders of magnitude, `response_min` by ten times, `falloff_cv_min` by five times,
+`motion_max` exactly. There is no check left for it to fail. Curving the same cover over a
+mug does not change the verdict either.
+
+**What this does not mean.** Nothing unlocked. The magazine's face is not the enrolled user,
+matching still gates the pipeline, and there is no enrolment on this machine to match
+against. The claim is narrower and worse: **liveness contributes nothing against a print.**
+Whatever rejects a printed attack today, it is not the subsystem whose job that is.
+
+### `falloff_cv` cannot be repaired by moving its floor
+
+| class | n | min CV | max CV |
+|---|---|---|---|
+| live (nocturnal) | 8 | 0.2661 | 0.3481 |
+| live (daylit) | 4 | 0.3071 | 0.3847 |
+| **flat print** | 1 | **0.2733** | **0.2733** |
+
+The print sits **above** the worst live face. `worst live 0.2661, best flat 0.2733,
+margin -0.0071` — the ranges interleave, so no threshold exists, at any value, that admits
+every live capture and rejects the print. The enforced floor of 0.05 was always documented as
+a degenerate-flatness guard claiming nothing about real prints ([12](12-falloff-calibration.md));
+this is the measurement that shows the gap between what it guards and what it needs to.
+
+[B21](#b21) predicted this direction before the recording existed: a printed face carries
+albedo structure — dark brows, bright forehead, shadowed sockets — and albedo enters the
+ON−OFF difference exactly like geometry, because the check cannot tell them apart. The
+prediction was that a real print would read *higher* than the blank page's 0.2486 median,
+closer to live. It reads 0.2733, and "closer to live" turned out to mean past it.
+
+### The lead: real, and far thinner than it first measured
+
+The `ctr/edge` column, which nothing enforces and the corpus test only prints, appeared to
+separate cleanly:
+
+| class | ctr/edge, worst of 41 pairs |
+|---|---|
+| live faces (12 captures, both regimes) | 1.446 – 1.774 |
+| flat printed face | 0.894 |
+| printed face curved over a mug | 0.876 |
+| flat print + IR floodlight | 0.918 |
+
+**Two corrections to this entry's own earlier drafts**, both worth keeping visible because they
+are opposite failure modes and the second was the more expensive:
+
+*First draft* quoted the live band as 1.446–1.954 over 11 captures. 1.954 and 1.602 are
+`attack_floodlight_daylight` and `attack_floodlight_room` — *attack* rows, pooled into the live
+class by reading down a column. The honest band is 1.446–1.774 over 12 captures, and the error
+inflated the very gap the section was arguing for.
+
+*Second draft* then over-corrected, declaring the statistic refuted and citing four mechanisms —
+that the live signal was the box border sampling dark room, that shrinking the box collapsed
+live into the printed band, that a blank page reached 2.08, and that the print's reading was a
+low-percentile draw from its own placement distribution. **All four were checked and all four
+failed.** They are recorded here as retractions rather than deleted, because each is a plausible
+story that a careful reader would otherwise re-invent:
+
+- **"The edge ring is background."** It is majority on-face. For `live_bright_control_20260819`,
+  mean `D` is 163.6 in the centre cells, 100.2 in the 20-cell edge ring, 43.7 in the annulus
+  just *outside* the box, and 16.1 in the far field. The ring sits 2.3× above its surroundings —
+  it is cheek and jaw, not room.
+- **"Shrink the box and live collapses into the print band."** The comparison was unmatched —
+  live at 0.5 scale against prints at 1.0. At matched scale the separation survives at every
+  scale the pipeline could operate at; the first inversion is at s=0.50 and it is driven by a
+  *live* capture falling below the print band, which is a false-reject, not a spoof-accept. And
+  there is no shrink: `post_box` takes `d.bounds` straight through with no rescaling, so s=0.5
+  is not an operating point and not attacker-reachable. The discriminator was wrong too — the
+  repo's own synthetic dome and a modelled Lambertian hemisphere both collapse under the same
+  shrink.
+- **"A blank page reaches 2.08."** No provenance. That figure appears in no test output and no
+  wiki page; `flat_printed_page` takes the placement-search branch and the falloff test prints
+  no `ctr/edge` for it at all. The flat printed *face* reaches 0.00% of 4,482 placements above
+  1.35.
+- **"0.894 is an 18th-percentile draw, so it is placement bias."** The symmetry control kills
+  it: run the identical sweep on live captures and their placement medians are also ~0.91–1.07,
+  with their *detected* readings at the **92.9th–99.7th percentile**. Prints land low and faces
+  land high precisely because YuNet puts the box on the subject. The percentile is the
+  measurement, not the confound.
+
+So the mechanism is not what the second draft claimed. What is actually wrong with the finding
+is narrower, and it is enough:
+
+**1. The 0.53 gap is an artifact of a worst-of-41-pairs statistic, and the pipeline never sees
+41 pairs.** `min_pairs = 2`, the daemon needs `min_pairs * 2` frames, and a burst is
+`burst_frames = 6` — three ON/OFF pairs, ~0.25 s. Per-pair on the detected box:
+
+```text
+                              n    min      med      p90      max
+flat_printed_face            41    0.894    1.280    1.418    1.443
+live_lit_frontal (weakest)   41    1.446    1.478      -        -
+```
+
+The print's *maximum* pair sits at 1.443 against the weakest live capture's *minimum* of 1.446.
+**The real margin is ~0.2%, not 0.53** — and the 0.894 headline is the single worst pair of a
+7.4 s hand-held capture, a statistic the running system would never compute.
+
+**2. The corpus is n=1 on both sides, and only one of those was previously written down.** One
+magazine cover — three takes inside 82 seconds is one object, not three samples. And on the live
+side, **one subject**: all 12 live captures are the operator, there is no `subject` field in any
+sidecar, and no second person appears anywhere in `corpus/`. A floor calibrated from one head
+risks locking out real users as much as admitting attackers, and nothing in this project had
+flagged that until now.
+
+**3. Zero daylight prints.** Every print capture reads pedestal 0.000. The only flat object at
+nonzero ambient is `flat_printed_page` at 7.898 — blank stock, no detected box, and 6.5× below
+the daylight regime that motivated the errand (`live_daylight_frontal` sits at 51.7). Whatever
+`ctr/edge` does at pedestal 50 is unmeasured, and the ambient-cancellation argument for it is
+the *same* derivation `falloff_cv` had — which was just refuted.
+
+**4. It is not face-specific.** A bare ceramic mug reads **1.800** — above every live face in the
+corpus. Whatever the statistic responds to, "is alive" is not it; convex geometry is enough.
+
+**Verdict: no threshold, enforced or advisory.** Not because the statistic is refuted — it is
+not, and the placement symmetry control is genuine evidence *for* it — but because a ~0.2%
+margin at the real burst length, from one print and one face, in one ambient regime, is not a
+number anyone should gate authentication on. An advisory threshold would still put a value in
+the config and a row in the report that reads as progress.
+
+> **Provenance, kept because [B19](#b19)'s lesson was about exactly this.** **Observed** here:
+> the live band and the two mis-pooled attack rows (the corpus test's own output), `min_pairs`
+> and `burst_frames = 6` (the configs), the mug at 1.800 (the same output), and the three code
+> defects — the new unit test was run against the pre-fix function and fails on it, `left: inf,
+> right: 0.0`, "a dead border must not read as live". **Re-derived, not re-run by hand:** the
+> per-pair distributions, the placement percentiles, and the edge-ring annulus figures, each
+> produced by independent throwaway harnesses that reproduce the shipped table to 4 dp. That is
+> enough to decline a threshold. It would not be enough to set one, and the retractions above
+> are what that distinction costs when it is skipped.
+
+### What was fixed, since the statistic stays as a reported column
+
+Auditing it for promotion found three defects that would have mattered the moment it carried a
+threshold, all of them in the *passing* direction under the `Fails::Below` wiring it would need:
+
+- `INFINITY` was returned when the border mean was ~0 — which passes any minimum. The border of
+  a presented object is exactly what an attacker chooses, so a matte-black IR-absorbing surround
+  is the input that reaches it.
+- A uniformly negative field (ON darker than OFF) returned a large **positive** ratio, also
+  passing. `falloff_cv` has guarded its analogous case since B18; the guard never reached here.
+- A slice shorter than 36 cells **panicked**, and a panic on the daemon's path is a refused
+  unlock.
+
+All three now return 0.0, the failing value, held by
+`centre_edge_fails_closed_on_every_degenerate_input`. No corpus placement triggers any of them,
+which made them latent rather than benign. Note the contrast with `dark_ratio`, which returns
+`INFINITY` deliberately and correctly — it is `Fails::Above`, so the *direction* of the check
+decides what a degenerate input should return, not the arithmetic.
+
+### What would actually settle it
+
+The second draft of this section proposed a black-surround / white-surround print pair, on the
+theory that the live signal came from the box border sampling dark room. That theory is
+retracted above, so the experiment it justified is no longer the pointed one. What the corpus
+actually lacks, in priority order:
+
+1. **A second live subject.** This is now the cheapest and most glaring gap: every live number
+   in this project comes from one person's head. It needs no printer and no errand, and it
+   bounds the false-reject side that nothing has ever tested.
+2. **A second print object**, different stock and tone, so the print side stops being n=1. Held
+   **propped, not hand-held** — the 0.894 headline came from a sheet drifting over 7.4 s — and
+   sized so its detected box is close to the live control's, which `corpus/README.md` rule 3
+   already required and the 2026-08-19 set broke.
+3. **Prints in daylight**, at a pedestal near the 51.7 the live corpus reaches. Every print
+   number here is nocturnal, and the ambient-invariance argument for `ctr/edge` is the same one
+   `falloff_cv` had before it was refuted.
+
+And one change that costs no recording at all: **the corpus test should report the per-pair and
+3-pair-burst distribution, not the worst of 41.** The entire apparent 0.53 margin was an artifact
+of a statistic the running system never computes, and no future session should be able to
+reproduce that mistake by reading the same column.
+
+
+### Why this is worth the entry it is getting
+
+S5 has been open since day one and was the item the roadmap called "the one genuinely
+unproven claim in the project". It closed for the price of one magazine cover and eight
+minutes of recording, on the branch that says the current design is insufficient.
+
+That is the cheap version of this discovery. The expensive version is a security review after
+a PPA release, or a user with a printed photo. The whole point of Phase 0 existing was to buy
+the cheap version, and here it did — several phases later than planned, which is its own
+lesson: this recording was deferred on 2026-08-04 as a risk-register item and every week it
+stayed deferred was a week the falloff design looked settled.
 
 ---
 

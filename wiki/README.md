@@ -24,14 +24,51 @@ front of the whole burst and so it also disables `falloff` — which is computed
 *difference*, where the ambient pedestal cancels exactly, and which measurement now shows is
 **unaffected by ambient right up to a pedestal of 51.7**. Daylight was written up as a
 hardware ceiling; that was wrong, on a same-hardware fact (Windows Hello succeeds in the
-room where Faciolock refuses, on this laptop). What blocks daylight is the negative class:
-`falloff` has never been calibrated against a print, so opening the gate would trade a
-measured refusal for an unmeasured acceptance. One afternoon of recording closes it —
-**[13](13-daylight.md)** now holds that question in one place, with the ways out ranked.
+room where Faciolock refuses, on this laptop). **[13](13-daylight.md)** holds that question
+in one place, with the ways out ranked.
 
-One thing stated there that was not stated plainly anywhere before: the ambient gate is a
-**UX hint, not a security control**, since [B20](11-bug-log.md#b20) showed the attacker sets
-its input.
+**The negative class exists now, and it broke the plan.** Rescoping the gate onto `falloff`
+was the cheap way out, and it required knowing what `falloff` reads on a print — never
+measured, "the one genuinely unproven claim in the project", open since day one. A magazine
+cover settled it on 2026-08-19 for the price of eight minutes:
+
+```text
+flat_printed_face   falloff CV 0.2733    worst live face 0.2661    ->  the print reads HIGHER
+```
+
+The classes interleave, so **no threshold on `falloff` separates a live face from a printed
+one**, and a flat printed face clears every enforced liveness check — dark-frame, response,
+falloff, motion — and is detected by YuNet while doing it ([B24](11-bug-log.md#b24)). Nothing
+unlocked: the magazine is not the enrolled user and matching still gates. The finding is
+narrower and worse than an unlock, which is that liveness contributes nothing against a
+print. [B21](11-bug-log.md#b21) predicted the direction — ink enters the ON−OFF difference
+exactly like shape, so a photograph of a curved object carries the variance of a curved
+object — and "closer to live" turned out to mean past it.
+
+Phase 0's S5 therefore **exits on its second branch**, the one its criterion was phrased to
+allow: evidence that falloff alone is insufficient.
+
+`centre_edge_ratio` looked like the replacement — a directional question instead of a variance
+one, prints at 0.876–0.918 against live at 1.446–1.774. It is **real but far thinner than it
+measured**. The corpus test takes the worst of 41 pairs; the daemon judges 3. Per pair on the
+detected box, the print's *best* reading is 1.443 against the weakest live capture's *worst* of
+1.446 — a **~0.2% margin**, from one magazine and, on the other side, one subject: every live
+capture in this project is the same person's head. No print exists at daylight ambient. And a
+bare ceramic mug reads 1.800, above every live face, so whatever the statistic responds to,
+"alive" is not it.
+
+So **no threshold was taken, enforced or advisory**, and liveness still has no check that
+rejects a print. [B24](11-bug-log.md#b24) carries the numbers — including four plausible
+mechanisms for the split that were written down, checked, and retracted, which is most of why
+that entry is long.
+
+Auditing the statistic for promotion did find three defects that would have mattered the moment
+it carried a threshold — `INFINITY` and a uniformly-negative field both passed a minimum, and a
+short slice panicked — all now failing closed.
+
+One thing [13](13-daylight.md) states that was not stated plainly anywhere before: the
+ambient gate is a **UX hint, not a security control**, since [B20](11-bug-log.md#b20) showed
+the attacker sets its input.
 
 **`faciolockd` now answers, and Phase 2's exit criterion 4 is met** — `SOCK_SEQPACKET` at
 0600, SHA256-verified models, a warm stream, and a real verdict from the real camera in
@@ -65,7 +102,8 @@ the word "fast" would be checkable: the first request after a cold start waited 
 to be accepted, because the daemon bound the socket and then warmed the camera on the same
 thread. Every request paid it, including the ones that never touch a camera — a
 `NoEnrolment` answered in 1753 ms cold against 0.4 ms warm. The warm now runs on its own
-thread and the wait is **0 ms**. That was also quietly blocking Phase 6: the pre-warm agent
+thread; the wait is **0 ms** and the re-run harness answers that same cold `NoEnrolment` in
+**0.6 ms**. That was also quietly blocking Phase 6: the pre-warm agent
 only works if a poke can be answered *while* the camera warms
 ([06](06-performance-budget.md#cold-start--measured-2026-08-09-found-by-the-phase-3-harness-fixed-the-same-day)). Two hang bugs were
 caught in review first, both of them an unusable lock screen: the client set its socket
