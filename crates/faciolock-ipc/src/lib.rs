@@ -54,6 +54,14 @@ pub enum Op {
     Auth = 1,
     Enroll = 2,
     Status = 3,
+    /// "This user authenticated successfully, by some means." Sent from
+    /// `pam_sm_acct_mgmt`, which PAM runs after the whole stack has succeeded, and the
+    /// only thing that lifts the hard lockout in wiki/03 R5 (decision P4-b).
+    ///
+    /// It is not an authenticator and it grants nothing. Its entire effect is to reset a
+    /// failure counter, and the peer is already root — a peer that could lie to this op
+    /// could simply delete the counter file.
+    Clear = 4,
 }
 
 impl Op {
@@ -62,6 +70,7 @@ impl Op {
             1 => Ok(Op::Auth),
             2 => Ok(Op::Enroll),
             3 => Ok(Op::Status),
+            4 => Ok(Op::Clear),
             other => Err(ProtocolError::UnknownOp(other)),
         }
     }
@@ -80,6 +89,10 @@ pub enum Verdict {
     Unavailable = 2,
     NoEnrolment = 3,
     RateLimited = 4,
+    /// The daemon did the bookkeeping [`Op::Clear`] asked for. Carries no authorisation
+    /// and the caller discards it — `pam_sm_acct_mgmt` returns `PAM_IGNORE` whatever
+    /// comes back.
+    Ack = 5,
 }
 
 impl Verdict {
@@ -94,7 +107,8 @@ impl Verdict {
             Verdict::Deny
             | Verdict::Unavailable
             | Verdict::NoEnrolment
-            | Verdict::RateLimited => false,
+            | Verdict::RateLimited
+            | Verdict::Ack => false,
         }
     }
 
@@ -105,6 +119,7 @@ impl Verdict {
             2 => Ok(Verdict::Unavailable),
             3 => Ok(Verdict::NoEnrolment),
             4 => Ok(Verdict::RateLimited),
+            5 => Ok(Verdict::Ack),
             other => Err(ProtocolError::UnknownVerdict(other)),
         }
     }
@@ -303,10 +318,36 @@ mod tests {
     #[test]
     fn only_allow_is_an_allow() {
         assert!(Verdict::Allow.is_allow());
-        for deny in
-            [Verdict::Deny, Verdict::Unavailable, Verdict::NoEnrolment, Verdict::RateLimited]
-        {
+        for deny in [
+            Verdict::Deny,
+            Verdict::Unavailable,
+            Verdict::NoEnrolment,
+            Verdict::RateLimited,
+            Verdict::Ack,
+        ] {
             assert!(!deny.is_allow(), "{deny:?} must not be an allow");
+        }
+    }
+
+    /// Every wire code round-trips, in both directions, so a variant added on one side
+    /// and forgotten on the other fails here rather than at a lock screen.
+    #[test]
+    fn every_op_and_verdict_survives_the_wire() {
+        for op in [Op::Auth, Op::Enroll, Op::Status, Op::Clear] {
+            let mut buf = [0u8; REQUEST_MAX];
+            let n = Request::new(op, "csr", 0).expect("valid").encode(&mut buf);
+            assert_eq!(Request::decode(&buf[..n]).expect("decodes").op, op);
+        }
+        for verdict in [
+            Verdict::Deny,
+            Verdict::Allow,
+            Verdict::Unavailable,
+            Verdict::NoEnrolment,
+            Verdict::RateLimited,
+            Verdict::Ack,
+        ] {
+            let res = Response::new(verdict, 0);
+            assert_eq!(Response::decode(&res.encode()).expect("decodes").verdict, verdict);
         }
     }
 
