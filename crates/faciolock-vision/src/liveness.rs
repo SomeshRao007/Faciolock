@@ -300,11 +300,31 @@ pub fn falloff_cv(d_cells: &[f64]) -> f64 {
 
 /// Ratio of response in the centre cells to response in the border ring.
 ///
-/// A second, independent read on the same physics as [`falloff_cv`], and one with a
-/// direction: on a face the centre outshines the periphery, so this sits above 1. On a
-/// flat surface held square to the camera it sits near 1. Reported alongside CV because a
-/// crumpled or tilted print could raise CV without producing a centre-bright pattern.
+/// **Reporting only. This is not a liveness check, and the corpus does not yet support
+/// making it one.**
+///
+/// A second, directional read on the same physics as [`falloff_cv`]: on a face the centre
+/// outshines the periphery, so this sits above 1; on a flat surface held square to the
+/// camera it sits near 1.
+///
+/// The 2026-08-19 print corpus supports that direction — prints 0.876–0.918 against live
+/// 1.446–1.774 — but not by enough to gate on (wiki/11 B24). The corpus test reports the
+/// worst of 41 pairs; the daemon judges 3. **Per pair, the print's best reading is 1.443
+/// against the weakest live capture's worst of 1.446** — a ~0.2% margin, from one print
+/// object and one human subject, with no print recorded at daylight ambient. A bare
+/// ceramic mug reads 1.800, above every live face, so the statistic responds to convex
+/// geometry rather than to liveness.
+///
+/// It stays a reported column. The guards below are what an enforced version would need
+/// anyway, and they were written while auditing it for exactly that.
 pub fn centre_edge_ratio(d_cells: &[f64]) -> f64 {
+    // `falloff_cv` guards its own degenerate inputs; this had no analogue, and a `pub fn`
+    // that indexes a fixed grid will panic on a short slice. A panic on the daemon's path
+    // is a refused unlock, so it is guarded rather than documented.
+    if d_cells.len() < GRID * GRID {
+        return 0.0;
+    }
+
     let mut centre = Vec::new();
     let mut edge = Vec::new();
     for gy in 0..GRID {
@@ -319,8 +339,22 @@ pub fn centre_edge_ratio(d_cells: &[f64]) -> f64 {
             }
         }
     }
+
+    // Every degenerate case returns the **failing** value, because the only sensible
+    // wiring for a centre-brightness statistic is `Fails::Below`. This is the same choice
+    // `falloff_cv` makes at its non-positive-mean guard, and the deliberate opposite of
+    // `dark_ratio`'s INFINITY — that one is `Fails::Above`, where returning a huge number
+    // is the safe direction. The direction of the check decides, not the arithmetic.
+    //
+    // A non-positive edge mean means the border did not respond to the emitter, or
+    // responded backwards. The previous code returned `INFINITY` there, and a
+    // uniformly-negative field returned a large *positive* ratio — both of which sail past
+    // any minimum threshold as "maximally live". An attacker chooses what surrounds a
+    // presented object, so a matte-black IR-absorbing border is exactly the input that
+    // reaches this branch. No corpus placement triggers it today; that makes it latent,
+    // not benign.
     let e = mean(&edge);
-    if e.abs() < f64::EPSILON { f64::INFINITY } else { mean(&centre) / e }
+    if e <= 0.0 { 0.0 } else { mean(&centre) / e }
 }
 
 fn mean(xs: &[f64]) -> f64 {
@@ -542,5 +576,41 @@ mod tests {
             }
         }
         assert!(centre_edge_ratio(&dome) > 1.2);
+    }
+
+    /// Every degenerate input must return the value that **fails** a minimum threshold.
+    ///
+    /// This is the direction that matters: the statistic is only ever wired `Fails::Below`,
+    /// so a degenerate case returning `INFINITY` — which the old code did — passes as
+    /// maximally live. The border of a presented object is the region an attacker chooses,
+    /// which makes "the edge cells did not respond" an input to design for rather than an
+    /// impossibility. No corpus placement produces one today (wiki/11 B24).
+    #[test]
+    fn centre_edge_fails_closed_on_every_degenerate_input() {
+        let dark_border = {
+            let mut d = vec![0.0; GRID * GRID];
+            for gy in 1..GRID - 1 {
+                for gx in 1..GRID - 1 {
+                    d[gy * GRID + gx] = 50.0;
+                }
+            }
+            d
+        };
+        assert_eq!(centre_edge_ratio(&dark_border), 0.0, "a dead border must not read as live");
+
+        let all_negative = {
+            let mut d = vec![-1.0; GRID * GRID];
+            for gy in GRID / 2 - 1..=GRID / 2 {
+                for gx in GRID / 2 - 1..=GRID / 2 {
+                    d[gy * GRID + gx] = -10.0;
+                }
+            }
+            d
+        };
+        assert_eq!(centre_edge_ratio(&all_negative), 0.0, "ON darker than OFF is not a dome");
+
+        // A short slice used to panic, and a panic on the daemon's path is a refused unlock.
+        assert_eq!(centre_edge_ratio(&[]), 0.0);
+        assert_eq!(centre_edge_ratio(&[1.0; GRID * GRID - 1]), 0.0);
     }
 }

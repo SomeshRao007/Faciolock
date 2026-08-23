@@ -556,30 +556,38 @@ fn falloff_is_computed_on_a_difference_so_ambient_should_cancel() {
     let live: Vec<f64> = nocturnal.iter().chain(&daylit).cloned().collect();
     let worst_live = live.iter().cloned().fold(f64::INFINITY, f64::min);
 
+    // Placement-searched rows are context, never the verdict. A `flat_*` capture that YuNet
+    // detected was measured over the box the pipeline itself would use, so it settles the
+    // margin and a leftover no-face capture must not suppress it — which is what the earlier
+    // `if !flat_spread.is_empty()` / `else if` ordering did the moment a detected print
+    // joined a corpus that already held `flat_printed_page`.
     if !flat_spread.is_empty() {
         eprintln!(
-            "\nPLACEMENT-DEPENDENT, SO NO VERDICT. A presented flat surface has no face for\n\
-             YuNet to find, so its ROI must be *chosen* rather than detected — and the choice\n\
-             decides the answer:"
+            "\nPlacement-searched rows (no face detected, so the ROI was *chosen*, and the\n\
+             choice decides the answer):"
         );
         for (stem, lo, med, hi) in &flat_spread {
             eprintln!("  {:<34} {:.4} .. {:.4}   median {:.4}", truncate(stem), lo, hi, med);
         }
-        eprintln!(
-            "\nAgainst worst live {worst_live:.4}, that range straddles the live band rather than\n\
-             sitting below it. Choosing the ROI by 'strongest weakest cell' — the obvious\n\
-             on-object rule — selects the most uniformly lit patch and lands near the bottom of\n\
-             the range. That is how this test reported a 2.45x separation on 2026-08-09 which\n\
-             was entirely placement bias.\n\n\
-             The real pipeline never chooses. YuNet returns the box, and against a genuine print\n\
-             attack it returns the box *on the printed face*. So the deciding number is falloff\n\
-             over a DETECTED box on a printed face — which needs a printed face. A blank page\n\
-             cannot stand in: it lacks the albedo structure a face photo carries (dark brows,\n\
-             bright forehead), and that structure adds spatial variance, pushing a real print UP\n\
-             toward the live band. This capture is a lower bound on the flat class, not a sample\n\
-             of it."
-        );
-    } else if !live.is_empty() && !flat.is_empty() {
+        if flat.is_empty() {
+            eprintln!(
+                "\nNO VERDICT. Against worst live {worst_live:.4}, that range straddles the live band\n\
+                 rather than sitting below it. Choosing the ROI by 'strongest weakest cell' — the\n\
+                 obvious on-object rule — selects the most uniformly lit patch and lands near the\n\
+                 bottom of the range. That is how this test reported a 2.45x separation on\n\
+                 2026-08-09 which was entirely placement bias.\n\n\
+                 The real pipeline never chooses. YuNet returns the box, and against a genuine print\n\
+                 attack it returns the box *on the printed face*. So the deciding number is falloff\n\
+                 over a DETECTED box on a printed face — which needs a printed face. A blank page\n\
+                 cannot stand in: it lacks the albedo structure a face photo carries (dark brows,\n\
+                 bright forehead), and that structure adds spatial variance, pushing a real print UP\n\
+                 toward the live band. This capture is a lower bound on the flat class, not a sample\n\
+                 of it."
+            );
+        }
+    }
+
+    if !live.is_empty() && !flat.is_empty() {
         let best_flat = flat.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         eprintln!(
             "\nworst live {worst_live:.4}   best flat {best_flat:.4}   margin {:.4}",
@@ -595,7 +603,7 @@ fn falloff_is_computed_on_a_difference_so_ambient_should_cancel() {
                 "OVERLAP. Falloff cannot carry liveness alone and the daylight non-goal stands."
             }
         );
-    } else {
+    } else if flat_spread.is_empty() {
         eprintln!(
             "\nNo `flat_*` capture, so the flatness floor is uncalibrated. What is needed is a\n\
              flat presentation of a FACE, so that detection supplies the ROI instead of this\n\
