@@ -3,7 +3,31 @@
 IR face authentication for Linux via PAM. Rust. Built to look and behave like a
 platform component, not an add-on.
 
-**Status: Phases 1 and 3 built; Phase 2 open on one criterion.**
+**Status: Phases 1, 3 and 4 built; Phase 2 open on one criterion.**
+
+**Phase 4 landed 2026-08-23** — the template store is no longer plaintext and no longer
+keyed by a name. `<uid>.tpl` is XChaCha20-Poly1305 with the uid authenticated as associated
+data, so a copied file does not decrypt, a file renamed to another uid does not decrypt, and
+one flipped bit is an error rather than a slightly different face. The key is a **root-only
+file, not the TPM** — [Q5 decided that](08-open-questions.md#q5--tpm-sealing-v1-or-later--decided-2026-08-23-later)
+with the seam built, and [03 R6](03-pam-and-security.md#r6--templates-are-encrypted-the-key-is-a-file-not-the-tpm-v1)
+now carries a table of exactly which attacks that stops and which it does not. Alongside it:
+a persistent three-strike failure budget, a lockout released through `pam_sm_acct_mgmt`, and
+one structured journal line per attempt.
+
+**The failure budget is not a backstop any more, and that is the phase's real finding.**
+R5 was written as the net under liveness. [B24](11-bug-log.md#b24) inverted it — a printed
+face clears every enforced liveness check — so until something rejects a print, **the rate
+limiter is the only control between a photograph and unlimited retries**. Nothing about the
+design changed; what changed is what it is holding up.
+
+Two smaller things the build settled. [04's data layout](04-architecture.md#data-layout) was
+internally inconsistent — it said the templates were `root:root` while R7 runs the daemon as
+`User=faciolock`, and the daemon has to read them; corrected, with the consequence (anything
+running as `faciolock` can read the key) written down rather than left to be discovered. And
+`PAM_IGNORE` was verified out of the shipped `libpam.so.0` rather than a header, because
+`libpam0g-dev` is no longer installed here and `pam.rs`'s standard is that its constants are
+read rather than recalled — which cross-checked the four already there.
 
 **Phase 1.** `crates/faciolock-vision` takes frames in and produces a
 verdict out — liveness, YuNet detection, alignment, SFace embedding, k-of-n matching — with
@@ -167,10 +191,16 @@ under 400 ms wall-clock, zero RSS when idle.
 | P3-a | **The socket path is a pam.d argument and never an environment variable.** The module runs as root in a process whose environment an unprivileged caller influences; a path taken from the environment would let that caller point it at a daemon they wrote, which answers `Allow`. A pam.d file is root-owned, which is the whole reason the knob is safe there | 2026-08-09 |
 | P3-b | **Cancellation is checked at stage boundaries, not enforced mid-stage.** `POLLRDHUP` before the burst and before inference; an in-flight burst still finishes, so the camera can stay held ~400 ms past a cancel. Interrupting capture needs a worker thread and a flag, and nothing has measured that hold as a problem | 2026-08-09 |
 | P3-c | **PAM-side deadline 3 s, applied to connect, write and read separately.** Above the daemon's own worst case (1500 ms capture + ~350 ms inference) so the daemon gives up first. It bounds `connect` too, which is not decorative — an `AF_UNIX` `connect` sleeps rather than fails when the listener's backlog is full | 2026-08-09 |
+| P4-a | **The template key is a root-only file, not the TPM.** The store is encrypted either way; what was decided is where the key lives. `store::KeyProvider` puts the choice on disk *and* in the AEAD's associated data, so adding `Tpm = 1` later is a value old code refuses rather than a format break. The packaging objection that shaped Q5 turned out not to bind — `librust-tss-esapi-dev` is in the archive — but a C library in the process that parses attacker pixels still is a cost | 2026-08-23 |
+| P4-b | **The lockout is released by `pam_sm_acct_mgmt`, not `pam_sm_setcred`.** Both are "the stack succeeded" signals; `setcred` is not called reliably by screen lockers, and the lock screen is exactly where a locked-out user is standing. The module returns `PAM_IGNORE` on every path, because an account-stack failure refuses a login outright instead of falling through to a password | 2026-08-23 |
+| P4-c | **Backoff and lockout numbers are hardcoded, never config.** Same rule the vision thresholds already follow: a threshold reachable from an editable file is a threshold an attacker with one write sets to zero, and this one is read by the process that grants access | 2026-08-23 |
+| P4-d | **`faciolock-store` is not built.** wiki/04 planned it; the store has one consumer, and Phase 5's CLI reaches it over the socket like everything else. A crate boundary with one consumer costs maintenance and buys nothing | 2026-08-23 |
+| P4-e | **Keyed by uid, translated once.** `users.rs` is the only place a username becomes a number; the store, the failure budget and the audit log never see a name. A name that does not resolve answers `NoEnrolment` — the same answer an unenrolled real user gets, so the socket cannot enumerate accounts | 2026-08-23 |
 | P2-h | **No RGB camera in v1.** Measured: it cannot see the emitter (SNR 0.85 vs the IR camera's 1,500–15,000), so it cannot do strobe liveness. AND-ing it in would rely on a branch that reads *true* for attackers in daylight; OR-ing it in lets a photo unlock. Deferred to v2 as an explicit opt-in tier | 2026-08-06 |
 
-Still open: Q4 (IPC), Q5 (TPM timing), Q9 (name), and whether the real recordings are ever
+Still open: Q4 (IPC), Q9 (name), and whether the real recordings are ever
 published (deferred to ITP — publishing is irreversible, so it is not decided early).
+Q5 closed 2026-08-23 (P4-a) and names what would re-open it.
 
 ## Reference hardware
 
@@ -203,6 +233,10 @@ hardware and resolves to the RGB camera —
 
 | Claim | Status |
 |---|---|
+| A template copied to another machine is unusable | **verified 2026-08-23**, in CI. There is no second machine here, so "another machine" is modelled as what one *is* to this format — a different key — and the test asserts the two stores genuinely generated different keys, so the refusal is not passing for an unrelated reason. A template renamed to another uid fails too, which is the implantation half |
+| The failure budget survives a daemon restart | **verified 2026-08-23** — `sudo tools/ratelimit-try.sh`, 23/23, against the real socket: the file outlives `kill -9` and a restarted daemon refuses on it. That the write lands *before* the reply is shown indirectly, by `Op::Clear` removing the entry from disk while the daemon still runs; the direct version needs a failure the daemon recorded itself, which needs a camera |
+| A locked-out user is refused **before** the camera and the store | **verified 2026-08-23** — same user, same daemon, answers `NoEnrolment` the instant the lockout is cleared, so the budget is what answered first |
+| A denied face moves the failure counter | **unobserved, and not reachable without hardware.** Every verdict the harness can produce is exempt from counting by design; a counting one needs a face in front of a real camera |
 | The ambient gate keys on a quantity **only the attacker can raise** | **refuted 2026-08-09** — presenting a bright object 40 cm from the lens collapses the floor 2,170×: the operator's own face read 28.221 and was *gated*, a ceramic mug in the same minute read 0.013 and *passed*. The AGC shortens exposure for a bright near object and the pedestal follows, so the attacker sets the gate's input ([B20](11-bug-log.md#b20)) |
 | Falloff separates a live face from a **flat print** | **still unmeasured, after three recording attempts.** A flat blank page was captured 2026-08-09 and cannot settle it: with no face to detect, the ROI must be chosen, and across valid placements CV spans 0.036–1.71 (median 0.249) against a worst live of 0.2661 — wider than the live band, so the choice decides the answer ([B21](11-bug-log.md#b21)). Needs a flat presentation of a FACE, so detection supplies the ROI. A blank page is an *optimistic* stand-in, not a conservative one: print albedo adds variance falloff cannot distinguish from depth |
 | The camera reports **exposure time** per frame, which would fix B20's gate | **refuted 2026-08-09.** The `UVCM` metadata node streams, and over 30 frames it carries **zero `CaptureStats`**. This firmware does not report its integration time, so pedestal ÷ exposure — the one candidate for a gate input the attacker cannot pull down — has no input here ([10/Probe 8](10-hardware-probe.md#probe-8--the-metadata-node)) |

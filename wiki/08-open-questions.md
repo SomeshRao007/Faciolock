@@ -291,15 +291,51 @@ there's a reason not to.
 
 ---
 
-## Q5 — TPM sealing: v1 or later? And which PCRs?
+## Q5 — TPM sealing: v1 or later? — **DECIDED (2026-08-23): later**
 
-TPM-sealed templates are a genuine first for face auth on Linux. But PCR selection is
-a real usability trap: bind to PCR 7 (secure boot state) and a firmware update
-invalidates every enrolment; bind to nothing meaningful and the sealing is theatre.
+**Decision: v1 ships a root-only key file. The TPM is deferred, with the seam built.**
+Recorded as P4-a.
 
-Options: v1 with a conservative PCR set and a documented re-enroll path; or v2, with
-v1 shipping root-only-file storage (still better than Howdy's plaintext). Note that
-TPM adds a `tpm2-tss` native dependency, which touches Q2's packaging argument.
+The store is encrypted either way — that part was never the question. What was decided is
+*where the key lives*, and the answer is a 32-byte file at `/var/lib/faciolock/key`, mode
+0600, created with `create_new` + `mode` so it never exists at a looser mode for even one
+syscall.
+
+**What that buys and what it does not.** A copied `.tpl` is worthless, which closes A3's
+theft half against anyone who grabbed the template. A full disk image is not stopped, because
+the key is on the same disk. wiki/03 R6 states the reduced guarantee plainly rather than
+implying a protection that is not there.
+
+**Why the seam and not the feature.** `store::KeyProvider` is an enum whose discriminant is
+written into the file *and* into the AEAD's associated data. Adding `Tpm = 1` later produces
+a file that old code refuses rather than one it silently misreads, so deferring costs a
+format migration of exactly nothing.
+
+**What would re-open it.** Not "we have time" — a threat that the key file does not answer.
+The obvious one is a machine that leaves the owner's control while powered off, which is the
+laptop case this project targets, so this decision is worth revisiting before the PPA release
+rather than after.
+
+**The packaging argument turned out not to bind.** It was assumed that TPM meant carrying a
+`tpm2-tss` native dependency against Q2's grain. Checked 2026-08-23:
+`librust-tss-esapi-dev 7.5.1-4` and `libtss2-dev 4.1.3-6` are both **in the Ubuntu archive**,
+so the TPM path costs one build-dependency, not the archive story. It is still a C library
+linked into the process that parses attacker-controlled pixels, which is a real cost and the
+one that survives — but the packaging objection does not, and the record should not keep
+citing it.
+
+The reference machine has TPM 2.0 at `/dev/tpmrm0`, so whenever this is picked up the
+hardware is there to develop against.
+
+### PCR selection, for whoever picks this up
+
+Unchanged and still the trap that made this a question. Binding to PCR 7 (secure-boot state)
+adds protection against booting a live USB on the owner's own laptop, and costs a **silent**
+re-enrolment on every firmware update or secure-boot key rotation — silent because nothing
+fails loudly; face unlock simply stops working and the password still does. Binding to
+nothing meaningful still binds to the *chip*, which is the machine-theft threat, and survives
+updates. Sealing with no PCR policy is the conservative answer, not the weak one; PCR 0 or 4
+would break on every kernel update and should not be considered.
 
 ---
 

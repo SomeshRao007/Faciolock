@@ -114,7 +114,7 @@ camera at the other end and a face check makes no sense.
 | IPC message parsing | A2 | fixed-size binary framing, hard length caps, no serde on untrusted input beyond a size-bounded frame |
 | V4L2 frame data | A1, A2 | parsed only in the unprivileged sandboxed daemon |
 | ONNX model files | A2, A3 | root-owned, 0644, hash-verified at load |
-| Template store | A2, A3 | root-owned dir, TPM-sealed contents |
+| Template store | A2, A3 | daemon-owned dir 0700, AEAD-encrypted contents bound to the uid ([R6](#r6--templates-are-encrypted-the-key-is-a-file-not-the-tpm-v1)) |
 | Config file | A2 | root-owned, read by daemon only, never by the PAM module |
 
 ## Part 3: Design rules that fall out of this
@@ -170,17 +170,82 @@ for that user until a successful password authentication. This is the piece Howd
 has none of, and it is what turns "a photo might work" from a 200-attempt certainty
 into a 3-attempt gamble.
 
-### R6 — Templates sealed to the TPM
+**Built in Phase 4** as `crates/faciolock-daemon/src/ratelimit.rs`. N is **3** — the number
+this paragraph already implied, taken from here rather than invented. One failure costs 1 s,
+two costs 2 s, the third disables face unlock for that user until something clears it.
 
-Embeddings are encrypted with a key sealed to TPM 2.0 against a PCR policy. The
-sealed blob on disk is worthless on any other machine, and worthless on this machine
-if the boot chain changed. This directly addresses A3 both ways: no biometric theft,
-and no offline template implantation (an attacker can write a file, but cannot
-produce one the daemon will unseal).
+**This stopped being a backstop.** The paragraph above is written as though liveness were
+the primary control and this the safety net. [B24](11-bug-log.md#b24) reversed that: a flat
+printed face clears every enforced liveness check and is detected by YuNet while doing it.
+Until a check exists that rejects a print, **the failure budget is the only thing between a
+photograph and unlimited retries.** Nothing about the design changed; what changed is that it
+is now load-bearing, and it is worth knowing that when reading it.
 
-Open question: PCR selection is a real usability trade-off — bind too tightly and a
-kernel update invalidates enrolment. See [08](08-open-questions.md). Fallback when no
-TPM is present: a key in a root-only file, with the reduced guarantee documented.
+Three properties that took deciding, and are asserted rather than described:
+
+- **The budget is checked before the template load and before the camera.** A locked-out user
+  costs one hash lookup, lights no emitter, and learns nothing about whether they are
+  enrolled. `RateLimited` is not itself an attempt and does not extend the backoff — else a
+  caller retrying in a loop could hold themselves locked out without ever showing a face.
+- **Only verdicts that looked at a face count.** `Environment`, `Unusable` and `Failed` are
+  exempt (P2-g): the weather must not be able to disable face unlock. A cancelled request
+  never counts either — a user who walks away from a lock screen has not failed anything.
+- **The failure is written before the reply is sent.** A `kill -9` between the verdict and
+  the answer must not roll the counter back, or the budget is advisory.
+
+The numbers are hardcoded and there is no configuration key for them (P4-c). A threshold
+reachable from an editable file is a threshold an attacker with one write sets to zero, and
+the file would be read by the process that grants access.
+
+#### How the lockout is released
+
+`pam_sm_acct_mgmt` sends `Op::Clear` (decision P4-b). PAM runs the account stack after
+authentication has succeeded, so reaching that function *is* the signal — by password, by
+face, by whatever the stack accepted. `pam_sm_setcred` was the obvious candidate and lost on
+coverage: `sudo`, `su` and `login` call `pam_setcred`, but screen lockers are inconsistent
+about it, and the lock screen is precisely where a locked-out user is standing.
+
+**That module returns `PAM_IGNORE` on every path, including panics.** A failure returned from
+the *auth* stack falls through to a password prompt. A failure returned from the **account**
+stack refuses the login outright. Faciolock has no opinion about whether an account is valid
+and must never be able to express one, so there is no code path in it that can say anything
+else.
+
+`Op::Clear` grants nothing and is not an authenticator. The peer is already root by the time
+it runs — `SO_PEERCRED` is checked before the request body is read — and a root peer that
+wanted to lie about it could delete the database instead.
+
+### R6 — Templates are encrypted; the key is a file, not the TPM (v1)
+
+**What was designed:** embeddings encrypted with a key sealed to TPM 2.0 against a PCR
+policy, so the blob is worthless on any other machine and worthless on this one if the boot
+chain changed.
+
+**What v1 ships:** the encryption, with the key in a root-only file. [Q5 decided this on
+2026-08-23](08-open-questions.md#q5--tpm-sealing-v1-or-later--decided-2026-08-23-later)
+and P4-a records it. The reduced guarantee, stated plainly rather than implied:
+
+| Attack | v1 (key file) | TPM, no PCR | TPM + PCR 7 |
+|---|---|---|---|
+| Copies `<uid>.tpl` off the disk | **stopped** | stopped | stopped |
+| Writes a template to implant their own face | **stopped** | stopped | stopped |
+| Moves a template between users | **stopped** | stopped | stopped |
+| Images the whole disk | **not stopped** | stopped | stopped |
+| Boots a live USB on this laptop | **not stopped** | not stopped | stopped |
+| Has root on the running machine | not stopped | not stopped | not stopped |
+
+The last row is true of every column and is worth stating: root can read the decrypted
+template out of the daemon's address space regardless. Everything here is about the **disk**,
+not about a live compromise.
+
+**Built in Phase 4** as `store.rs`. XChaCha20-Poly1305 over the Phase 2 encoding, with the
+uid and the key-provider discriminant as associated data — so a template that is renamed to
+another uid, or edited by one bit, is a decryption failure rather than a different face. A
+file that exists and does not decrypt is an **error**, never "not enrolled": the latter would
+downgrade a damaged or tampered store to a silent password prompt.
+
+The key lives in the same directory as the templates on purpose. Anything that can read one
+can read the other, and separating them would be theatre.
 
 ### R7 — Sandbox the daemon aggressively
 
@@ -222,6 +287,37 @@ Every attempt logged to the journal via the daemon: timestamp, username, verdict
 reason, liveness score, match distance, and the PID/UID of the requesting peer.
 Successes and failures both. This is table stakes for a security component and it is
 what a distro security team will look for first.
+
+**Built in Phase 4** as `audit.rs`, one `key=value` line per attempt from a single
+construction site — the same discipline as the single `PAM_SUCCESS` site and the single
+`Allow` site, applied to the log, so an attempt cannot return without a record.
+
+```text
+<4>faciolockd: auth uid=1000 verdict=Deny reason=no-match best=0.312 live=~Falloff:0.0400
+    probes=3 pid 27608 uid 0 elapsed=673 counted=1
+```
+
+**Username became uid.** wiki/04 keys everything persistent by uid, and the log follows;
+`users.rs` is the one place a name is translated, and nothing below it sees one.
+
+The leading `<N>` is the syslog priority, which systemd parses off a service's stderr — so
+`journalctl -p` works for the cost of three characters rather than a `libsystemd` dependency
+in the process that parses attacker-controlled pixels. `<5>` allow, `<4>` deny, `<3>` lockout
+or pipeline fault, `<6>` a question the daemon declined to answer. A bright room logged at
+warning would train an operator to ignore the level.
+
+Two things the line carries that the paragraph above did not ask for, and should have:
+
+- **`counted=`** — whether this attempt moved the failure budget. The exemptions in R5 are a
+  policy that can be argued with, and an audit log that hid which way it went would make that
+  argument unresolvable.
+- **Advisory liveness failures**, marked `~`. These are the checks waiting on a spoof
+  recording to calibrate against; the journal is where the evidence for calibrating them
+  accumulates. An advisory failure rejected nothing, and the mark says so.
+
+What is logged is the **detailed** verdict — which check, at what value. What crosses the
+socket stays narrow, because telling a caller which check rejected them is telling an
+attacker what to fix.
 
 ## Part 4: Explicit limitations (to be in the README verbatim)
 

@@ -249,17 +249,100 @@ carries the numbers.
 
 ---
 
-## Phase 4 — Storage, TPM, policy (week 5)
+## Phase 4 — Storage, policy, audit (week 5)
 
-- Template store keyed by **uid**, multiple templates per user
-- TPM2 sealing via `tpm2-tss`; conservative PCR set; documented re-enrol path
-- Non-TPM fallback: root-only file, reduced guarantee documented
-- Rate limiter: per-user exponential backoff, **persisted across daemon restarts**
-- Lockout: after N failures, face disabled until a successful password auth
-- Audit logging to the journal: verdict, reason, liveness score, distance, peer PID/UID
+**Built 2026-08-23.** Renamed from "Storage, TPM, policy": the TPM is deferred, and the
+section title should say what the phase contains rather than what it was going to.
+
+- ~~Template store keyed by **uid**, multiple templates per user~~ — **done**, uid-keyed and
+  encrypted. One template per uid holding *n* embeddings, which is what
+  `faciolock_vision::Template` already was; separate named enrolments (glasses on/off as
+  distinct profiles) were dropped as unrequested
+- ~~TPM2 sealing via `tpm2-tss`; conservative PCR set~~ — **deferred, decision P4-a**. The
+  seam is in place: `store::KeyProvider` is a discriminant on disk and inside the AEAD's
+  associated data, so a `Tpm = 1` variant is a new value rather than a format break.
+  [Q5](08-open-questions.md#q5--tpm-sealing-v1-or-later-and-which-pcrs) records what would
+  re-open it
+- **Non-TPM fallback: root-only key file, reduced guarantee documented** — **done**, and it
+  is now the *primary* path rather than the fallback
+- ~~Rate limiter: per-user exponential backoff, persisted across daemon restarts~~ — **done**
+- ~~Lockout: after N failures, face disabled until a successful password auth~~ — **done**,
+  released through `pam_sm_acct_mgmt` and a new `Op::Clear` (decision P4-b)
+- ~~Audit logging to the journal~~ — **done**, one structured line per attempt with a
+  syslog priority prefix and no `libsystemd`
+
+### What the build settled that the plan did not anticipate
+
+**The store's threat model changed under it.** R5's rate limiter was written as a backstop
+behind liveness — "what turns *a photo might work* from a 200-attempt certainty into a
+3-attempt gamble". [B24](11-bug-log.md#b24) inverted that: a flat printed face clears every
+enforced liveness check. Until a check exists that rejects a print, the failure budget is not
+defence in depth, it **is** the defence, and `ratelimit.rs` says so in its header rather than
+leaving the reader to infer it from a bug entry three files away.
+
+**wiki/04's data layout was internally inconsistent, and this phase is where it mattered.**
+It specified `/var/lib/faciolock/users/<uid>.tpl` as `root:root 0600` while R7 runs the
+daemon as `User=faciolock`. Both cannot hold — the daemon must read templates to do its job.
+Corrected in [04](04-architecture.md#data-layout): the directory, the templates and the key
+belong to the daemon's own user. The honest consequence, now written down, is that anything
+running as `faciolock` can read the key; that is one process, and Phase 6's sandbox is what
+keeps it one.
+
+**`PAM_IGNORE` was verified against the shipped library, not the header.** `libpam0g-dev` is
+no longer installed on the reference machine, and `pam.rs`'s standard is that its constants
+are *read* rather than recalled. `pam_strerror` out of `libpam.so.0` is the stronger source
+and it cross-checked the four constants already there.
+
+### The one rule that is not negotiable in the account stack
+
+`pam_sm_acct_mgmt` returns `PAM_IGNORE` on **every** path — dead daemon, refused socket,
+malformed reply, panic. A failure returned from the *auth* stack falls through to a password
+prompt; a failure returned from the **account** stack refuses the login outright. Faciolock
+has no opinion about whether an account is valid and must never be able to express one. The
+`catch_unwind` there discards its result deliberately, and it is the only place in the crate
+where that is right.
 
 **Exit:** template file copied to another machine is unusable. Kill the daemon
 mid-backoff, restart, backoff persists. Journal shows every attempt.
+
+**Status: met, with one leg of the second criterion still indirect.** The first is closed in
+CI; the second and third were observed on 2026-08-23 through `tools/ratelimit-try.sh`, 23
+checks, 23 passed. What is not observed is a failure the *daemon itself* recorded, because
+every verdict reachable without a camera is exempt from counting by design.
+
+**The harness's first run reported 8 failures and every one of them was the harness.** Worth
+recording, because two were wrong beliefs about the daemon rather than typos:
+
+- It edited `ratelimit.db` behind a **running** daemon and expected it to notice.
+  `Limiter::load` runs once at startup and the state is held in memory, written through on
+  change. The daemon was right and the test was wrong — the fix is to write the budget while
+  it is down, which is also what the criterion actually describes.
+- It waited for the socket **inode** to appear after a restart. `kill -9` leaves the inode
+  behind, so the wait returned instantly and the request hit a dead socket. Readiness now
+  means a real answer to a real request.
+
+The other four were a **stale binary**: `cargo test` builds test binaries and does not
+rebuild `target/debug/faciolockd`, so the run exercised a daemon from before the audit
+changes. That is a lesson about the harness's own preconditions, and it is why the script
+now checks the daemon answers before it asserts anything about what it said.
+
+| Leg | State |
+|---|---|
+| A copied template does not decrypt | **observed**, `cargo test -p faciolock-daemon`. There is no second machine here, so "another machine" is modelled as what a second machine *is* to this format — a different key — and the test asserts the two stores really did generate different keys, so the refusal is not passing for some other reason |
+| A template cannot be moved between uids | **observed**. The uid is authenticated as associated data, so renaming `1000.tpl` to `0.tpl` fails to decrypt rather than handing over root's enrolment. This is A3's *implantation* half, which the plaintext store failed completely |
+| A single flipped bit is an error, not a different face | **observed**, at three offsets |
+| Nothing recognisable is left on disk | **observed** — asserted on the raw bytes, because "we called encrypt" is not the same claim |
+| The failure budget survives a reload | **observed**, unit test |
+| The daemon starts, binds and warms with the new config and store | **observed** — 6 frames in 339 ms, unchanged from Phase 2, and the `SO_PEERCRED` refusal still fires |
+| A locked-out user is refused before the camera | **observed 2026-08-23**, `sudo tools/ratelimit-try.sh`, 23/23. The proof of *ordering* is that the same user, on the same daemon, answers `NoEnrolment` the moment the lockout is cleared — so the budget was what answered first, not the store |
+| `Op::Clear` releases the lockout through the real socket | **observed**, and it survives a restart. A clear with nothing to clear is silent, which is the property that keeps `acct_mgmt` from writing a journal line on every login |
+| The budget survives `kill -9` | **observed, with one leg still indirect.** The file outlives the kill and a restarted daemon refuses on it. That the write lands *before the reply* is shown by `Op::Clear` removing the entry from disk while the daemon is still running — the same `flush()` that `record_failure` calls — rather than by a failure the daemon recorded itself, which needs a camera |
+| The journal shows every attempt | **observed** — 5 `auth` lines for 5 requests, 2 `clear` lines for 3 clears, every one carrying uid, verdict, reason, peer, elapsed and `counted=`. Priorities separate: `<3>` lockout, `<6>` not-enrolled |
+| `serve::listen` recovers from a socket left behind by `kill -9` | **observed**, and unplanned — the harness needed to know when a restarted daemon was ready, and the stale inode is why the first version of it reported four false failures |
+| **A denied face moves the counter** | **not done, and not reachable without hardware.** Every verdict the harness can produce is exempt from counting by design, because reaching a counting one needs a face in front of a real camera. The harness prints this rather than leaving it implied |
+
+The last row is the honest gap and it is the same gap Phase 3's exit has: the failure paths
+are demonstrable without a camera and the success path is not.
 
 ---
 
