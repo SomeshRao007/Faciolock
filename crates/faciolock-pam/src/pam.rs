@@ -10,6 +10,18 @@
 //! 1.7.0-5ubuntu3.1**, with the header line cited, rather than recalled. They are ABI: PAM
 //! modules are loaded by a libpam the distribution built separately, so a wrong constant
 //! here is not a compile error, it is a wrong authentication result.
+//!
+//! `IGNORE` was added in Phase 4 on a machine where that header was no longer installed, so
+//! it was read from the *shipped* `libpam.so.0` instead — which is the stronger source, and
+//! cross-checked the four that were already here:
+//!
+//! ```text
+//! pam_strerror(NULL, 0)  -> "Success"
+//! pam_strerror(NULL, 7)  -> "Authentication failure"
+//! pam_strerror(NULL, 9)  -> "Authentication service cannot retrieve authentication info"
+//! pam_strerror(NULL, 10) -> "User not known to the underlying authentication module"
+//! pam_strerror(NULL, 25) -> "The return value should be ignored by PAM dispatch"
+//! ```
 
 use core::ffi::{CStr, c_char, c_int, c_void};
 
@@ -21,6 +33,9 @@ pub const AUTH_ERR: c_int = 7;
 pub const AUTHINFO_UNAVAIL: c_int = 9;
 // _pam_types.h:43 — "User not known to the underlying authentication module"
 pub const USER_UNKNOWN: c_int = 10;
+// "The return value should be ignored by PAM dispatch" — the only code `pam_sm_acct_mgmt`
+// returns, on every path. See [`crate::pam_sm_acct_mgmt`] for why that is not a shortcut.
+pub const IGNORE: c_int = 25;
 
 // _pam_types.h:135 — the only item we read. `PAM_USER` (133) is reached through
 // `pam_get_user` instead, which is the documented accessor for it.

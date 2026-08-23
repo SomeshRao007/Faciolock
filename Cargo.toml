@@ -37,6 +37,17 @@ toml = "0.9"
 sha2 = "0.10"
 libc = "0.2"
 
+# Template encryption (P4-a). Daemon-only, for the same reason as the two above.
+#
+# Archive parity is the whole reason this crate and not another: `librust-chacha20poly1305-dev`
+# is packaged at 0.10.1, so the version here is the version Debian already ships. Pure Rust,
+# so it costs none of what Q2 bought by choosing `tract` over `ort`.
+#
+# `default-features = false` drops the `getrandom` dependency: the daemon already links
+# `libc` and calls the syscall directly, which is one crate fewer in a tree a distro security
+# reviewer reads.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+
 faciolock-camera = { path = "crates/faciolock-camera" }
 faciolock-ipc = { path = "crates/faciolock-ipc" }
 faciolock-pam = { path = "crates/faciolock-pam" }

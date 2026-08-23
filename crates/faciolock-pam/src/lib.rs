@@ -49,6 +49,22 @@ const DEADLINE: Duration = Duration::from_millis(3_000);
 /// is a hint, set below [`DEADLINE`] so the daemon gives up first and we hear about it.
 const REQUEST_TIMEOUT_MS: u16 = 2_000;
 
+/// [`Op::Clear`] touches no camera and no models — it is a hash-map removal and a small
+/// file rewrite — so it gets a fraction of [`DEADLINE`].
+///
+/// The number that matters is what it costs when the daemon is *absent*, because that is
+/// the common case on a machine where face unlock was never set up: `connect` to a missing
+/// socket fails immediately, so a normal password login pays nothing.
+///
+/// The pathological case is a daemon that accepted and then wedged, and there the cost is
+/// **900 ms, not 300** — [`client::ask`] bounds connect, write and read *each* by the
+/// deadline rather than the exchange as a whole (P3-c). Worth stating because it is added to
+/// a login that has already succeeded, so the user is watching a session that should already
+/// be open. Under a second is a stall; three seconds, which is what reusing [`DEADLINE`]
+/// here would have cost, is a bug report.
+const CLEAR_DEADLINE: Duration = Duration::from_millis(300);
+const CLEAR_TIMEOUT_MS: u16 = 200;
+
 /// PAM's authentication entry point.
 ///
 /// # Safety
@@ -70,6 +86,11 @@ pub extern "C" fn pam_sm_authenticate(
 ///
 /// A missing `pam_sm_setcred` makes the whole module unloadable, so this is not optional;
 /// wiki/03 says it can simply succeed, and there is nothing here that could fail.
+///
+/// **Not the lockout-clear signal.** It was the obvious candidate and it lost to
+/// `pam_sm_acct_mgmt` on coverage: `pam_setcred` is called by `sudo`, `su` and `login`, but
+/// screen lockers are inconsistent about it, and the lock screen is exactly where a user
+/// who has just been locked out is standing (decision P4-b).
 #[unsafe(no_mangle)]
 pub extern "C" fn pam_sm_setcred(
     _pamh: *mut pam::Handle,
@@ -78,6 +99,66 @@ pub extern "C" fn pam_sm_setcred(
     _argv: *const *const c_char,
 ) -> c_int {
     pam::SUCCESS
+}
+
+/// The lockout release (wiki/03 R5, decision P4-b).
+///
+/// PAM runs the account stack after authentication has succeeded, so reaching this function
+/// *is* the signal: somebody proved who they were, by password or by face or by whatever
+/// else the stack accepted. The module tells the daemon to forget that user's failures and
+/// then gets out of the way.
+///
+/// # This function returns `PAM_IGNORE` on every path, and that is not laziness
+///
+/// A module in the **account** stack that can return a failure can lock a user out of their
+/// own machine — not fall through to a password prompt, as a failure in the *auth* stack
+/// does, but refuse the login outright. Faciolock has no opinion about whether an account is
+/// valid, expired or permitted; it is using this callback purely as a notification. So there
+/// is no code path here that examines the daemon's reply, and none that can produce anything
+/// but `PAM_IGNORE`: not a dead daemon, not a refused socket, not a malformed reply, not a
+/// panic. The `unwrap_or` below is the same constant as the success path on purpose.
+///
+/// That also makes this the one entry point where the failure table in wiki/04 does not
+/// apply, because there is nothing to fail *into*.
+#[unsafe(no_mangle)]
+pub extern "C" fn pam_sm_acct_mgmt(
+    pamh: *mut pam::Handle,
+    _flags: c_int,
+    argc: c_int,
+    argv: *const *const c_char,
+) -> c_int {
+    // The result is discarded deliberately, and this is the one place in the crate where
+    // that is right: a panic below is a bug worth not propagating into `sudo`, and it is
+    // also not grounds for this function to answer anything different.
+    let _panicked = catch_unwind(AssertUnwindSafe(|| clear_lockout(pamh, argc, argv)));
+    pam::IGNORE
+}
+
+/// Best-effort notification. Every early return is a case where there is nothing useful to
+/// say to the daemon, and none of them changes what the caller gets back.
+fn clear_lockout(pamh: *mut pam::Handle, argc: c_int, argv: *const *const c_char) {
+    let opts = unsafe { options(argc, argv) };
+    let Some(handle) = (unsafe { pamh.as_mut() }) else {
+        return;
+    };
+    // A remote session never consumed a slot in the failure budget, so it has none to
+    // release. Skipping the IPC here is the same reasoning as in `authenticate` and keeps
+    // the promise that an SSH login touches the daemon not at all (wiki/03 R4).
+    if remote_session(handle).is_some() {
+        return;
+    }
+    let Some(user) = handle.user() else {
+        return;
+    };
+    let Ok(request) = Request::new(Op::Clear, user, CLEAR_TIMEOUT_MS) else {
+        return;
+    };
+
+    if let Err(e) = client::ask(opts.socket, &request, CLEAR_DEADLINE) {
+        if opts.debug {
+            pam::debug(&format!("faciolock: could not clear the lockout: {e}"));
+        }
+    }
 }
 
 fn authenticate(pamh: *mut pam::Handle, argc: c_int, argv: *const *const c_char) -> c_int {
@@ -128,6 +209,10 @@ fn code_for(verdict: Verdict) -> c_int {
         Verdict::Deny | Verdict::RateLimited => pam::AUTH_ERR,
         Verdict::NoEnrolment => pam::USER_UNKNOWN,
         Verdict::Unavailable => pam::AUTHINFO_UNAVAIL,
+        // `Ack` answers `Op::Clear` and can only arrive here if a daemon sent it in reply
+        // to an `Op::Auth`, which is a daemon that is broken or not ours. Either way it is
+        // not an authentication, and every non-`Allow` code means a password prompt.
+        Verdict::Ack => pam::AUTH_ERR,
     }
 }
 
@@ -202,9 +287,13 @@ mod tests {
     #[test]
     fn allow_is_the_only_verdict_that_authenticates() {
         assert_eq!(code_for(Verdict::Allow), pam::SUCCESS);
-        for verdict in
-            [Verdict::Deny, Verdict::Unavailable, Verdict::NoEnrolment, Verdict::RateLimited]
-        {
+        for verdict in [
+            Verdict::Deny,
+            Verdict::Unavailable,
+            Verdict::NoEnrolment,
+            Verdict::RateLimited,
+            Verdict::Ack,
+        ] {
             assert_ne!(code_for(verdict), pam::SUCCESS, "{verdict:?} must not authenticate");
         }
     }
@@ -219,6 +308,7 @@ mod tests {
             Verdict::Unavailable,
             Verdict::NoEnrolment,
             Verdict::RateLimited,
+            Verdict::Ack,
         ] {
             assert_eq!(
                 code_for(verdict) == pam::SUCCESS,
@@ -226,6 +316,37 @@ mod tests {
                 "{verdict:?} is classified differently by the two rules"
             );
         }
+    }
+
+    /// **The account stack's whole safety property.** `pam_sm_acct_mgmt` must return
+    /// `PAM_IGNORE` no matter what the daemon does, because anything else in the account
+    /// stack can refuse a login outright rather than fall through to a password prompt.
+    ///
+    /// Driven against real sockets rather than a mock: an absent daemon, a socket that
+    /// accepts and says nothing, one that answers garbage, and one that hangs up mid-reply.
+    /// A null handle covers the fourth path, where there is no user to ask about.
+    #[test]
+    fn account_management_ignores_everything_including_a_hostile_daemon() {
+        let dir = std::env::temp_dir().join("faciolock-acct-mgmt");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        // No handle: the early return, and the one case reachable without a live libpam.
+        assert_eq!(
+            pam_sm_acct_mgmt(std::ptr::null_mut(), 0, 0, std::ptr::null()),
+            pam::IGNORE,
+            "a null handle must still be ignored"
+        );
+
+        // And the transport half, through the same client the entry point uses. If any of
+        // these produced something other than an error the entry point would still return
+        // IGNORE, but this is what proves there is nothing for it to trip over.
+        let request = Request::new(Op::Clear, "csr", CLEAR_TIMEOUT_MS).expect("valid");
+        let missing = dir.join("absent.sock");
+        assert!(
+            client::ask(&missing, &request, CLEAR_DEADLINE).is_err(),
+            "an absent daemon is an error, not a hang"
+        );
     }
 
     /// wiki/03's table, spelled out. These are the codes that decide whether the user gets
