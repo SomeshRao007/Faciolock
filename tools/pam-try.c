@@ -29,6 +29,7 @@ struct pam_conv {
 
 extern int pam_start(const char *, const char *, const struct pam_conv *, pam_handle_t **);
 extern int pam_authenticate(pam_handle_t *, int);
+extern int pam_acct_mgmt(pam_handle_t *, int);
 extern int pam_end(pam_handle_t *, int);
 extern const char *pam_strerror(pam_handle_t *, int);
 
@@ -75,6 +76,28 @@ int main(int argc, char **argv)
 
 	printf("pam_authenticate -> %d  %-24s  %.1f ms\n  %s\n",
 	       rc, pam_strerror(pamh, rc), ms, name_of(rc));
+
+	/*
+	 * Phase 4: the account stack is how the lockout is released (wiki/03 R5, P4-b), and
+	 * the property to watch is that pam_faciolock returns PAM_IGNORE here whatever the
+	 * daemon does. PAM_IGNORE is 25 and does not appear in the stack's own result, so what
+	 * this prints is the *stack's* answer -- with pam_permit alongside it in the account
+	 * section, PAM_SUCCESS means faciolock declined to have an opinion, which is correct.
+	 * The daemon's journal is where the Op::Clear shows up.
+	 *
+	 * Run unconditionally, including after a failed pam_authenticate: an application would
+	 * not, but the thing being checked is that this call can never make things worse.
+	 */
+	clock_gettime(CLOCK_MONOTONIC, &a);
+	int acct = pam_acct_mgmt(pamh, 0);
+	clock_gettime(CLOCK_MONOTONIC, &b);
+	ms = (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) / 1e6;
+
+	printf("pam_acct_mgmt    -> %d  %-24s  %.1f ms\n  %s\n",
+	       acct, pam_strerror(pamh, acct), ms,
+	       acct == 0 ? "stack allowed the account; faciolock returned PAM_IGNORE"
+	                 : "the account stack refused -- faciolock must not be the reason");
+
 	pam_end(pamh, rc);
 	return rc == 0 ? 0 : 1;
 }

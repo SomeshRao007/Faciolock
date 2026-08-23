@@ -4,36 +4,42 @@
 //! two ONNX models and the template store, and the PAM module holds a socket. Nothing in
 //! this binary runs as root.
 //!
-//! ## Phase 2 exit criterion 4
+//! ## What lives here
 //!
-//! "`faciolockd` answers a hand-rolled socket request with a real verdict from the real
-//! camera." That is what this is. Deliberately **not** here, because Phase 3 and 4 own them
-//! and building them early would freeze decisions the measurements have not made yet
-//! (wiki/09):
+//! Phase 2 built the answer path, Phase 3 the access control on the socket, Phase 4 the
+//! policy: a uid-keyed encrypted [`store`], a persistent failure budget in [`ratelimit`],
+//! and one journal line per attempt in [`audit`]. Deliberately still **not** here:
 //!
-//! - `SO_PEERCRED`, remote-session rejection, cancellation — Phase 3, and they belong in
-//!   [`serve`], on the daemon side of the socket.
-//! - Rate limiting, lockout, audit logging, TPM sealing — Phase 4. In particular the
-//!   failure-budget policy is **not** on the wire ([B20] reopened the `Environment`
-//!   exemption and it has to stay re-decidable without a protocol break — wiki/13).
+//! - TPM sealing — deferred by P4-a with the seam in place ([`store::KeyProvider`]); wiki/08
+//!   Q5 records what would re-open it.
 //! - Socket activation and idle-exit — Phase 6.
+//!
+//! The failure-budget *policy* is not on the wire, on purpose: [B20] reopened the
+//! `Environment` exemption once already and it has to stay re-decidable without a protocol
+//! break (wiki/13). What crosses the socket is a category; what to do about it is decided
+//! here.
 //!
 //! [B20]: ../../../wiki/11-bug-log.md
 
+mod audit;
 mod config;
 mod models;
+mod ratelimit;
 mod serve;
 mod session;
 mod store;
+mod users;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use faciolock_ipc::{Op, Request, Verdict};
 use faciolock_vision::{Burst, Config as VisionConfig, Pipeline, pipeline::enroll_template};
 
 use config::Config;
+use ratelimit::{Decision, Limiter};
 use serve::Peer;
 use session::Session;
 
@@ -115,12 +121,23 @@ fn start(config_path: &Path) -> Result<Daemon, String> {
         vision.tier
     );
 
-    Ok(Daemon { session: Arc::new(Mutex::new(Session::new(cfg.clone()))), pipeline, cfg })
+    let limiter = Mutex::new(Limiter::load(&cfg.ratelimit));
+
+    Ok(Daemon {
+        session: Arc::new(Mutex::new(Session::new(cfg.clone()))),
+        limiter,
+        pipeline,
+        cfg,
+    })
 }
 
 pub struct Daemon {
-    /// Shared with the startup warm thread, and the only mutable state the daemon has.
+    /// Shared with the startup warm thread.
     session: Arc<Mutex<Session>>,
+    /// The failure budget (wiki/03 R5). Behind a mutex for the same reason `session` is:
+    /// the daemon is serial today, but the warm thread already shares the process and
+    /// Phase 6 may add more.
+    limiter: Mutex<Limiter>,
     pipeline: Pipeline,
     cfg: Config,
 }
@@ -133,6 +150,17 @@ pub struct Daemon {
 /// process because a warm-up panicked would be a worse failure than trying again.
 fn session_of(daemon: &Daemon) -> std::sync::MutexGuard<'_, Session> {
     daemon.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// A poisoned limiter is recovered rather than propagated, for a different reason than the
+/// session's: the in-memory state is a mirror of the file, and the file is rewritten whole
+/// on every change. Whatever a panic interrupted, the next `record_failure` re-derives.
+///
+/// Refusing to answer would be the worse failure in the other direction too — a limiter that
+/// panicked would disable face unlock for everybody until the daemon restarted, which is a
+/// denial of service reachable by whatever caused the panic.
+fn limiter_of(daemon: &Daemon) -> std::sync::MutexGuard<'_, Limiter> {
+    daemon.limiter.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl Daemon {
@@ -180,19 +208,47 @@ impl Daemon {
     /// send and nothing to count.
     pub fn answer(&self, req: &Request, peer: &Peer<'_>) -> Option<Verdict> {
         let user = req.username();
+
+        // **The one translation.** wiki/04 keys the store and the failure budget by uid;
+        // the wire carries a name because that is what `PAM_USER` gives the module. Below
+        // this line nothing sees a username.
+        //
+        // A name that does not resolve reads as `NoEnrolment` — the same answer an
+        // unenrolled real user gets, deliberately, so the socket cannot be used to
+        // enumerate accounts. It is also true: a user with no uid has no template.
+        let Some(uid) = users::uid_of(user) else {
+            return Some(Verdict::NoEnrolment);
+        };
+
         match req.op {
-            Op::Auth => self.authenticate(user, peer),
+            Op::Auth => self.authenticate(uid, peer),
             Op::Status => {
-                let enrolled = store::load(&self.cfg.templates, user)
-                    .inspect_err(|e| eprintln!("faciolockd: template store: {e}"))
+                let enrolled = store::load(&self.cfg.templates, uid)
+                    .inspect_err(|e| eprintln!("<3>faciolockd: template store: {e}"))
                     .ok()
                     .flatten()
                     .is_some();
                 Some(serve::status(enrolled))
             }
             Op::Enroll => {
-                eprintln!("faciolockd: refused enrolment over the socket for {user}");
+                eprintln!("<4>faciolockd: refused enrolment over the socket for uid {uid}");
                 Some(serve::enroll_over_the_wire())
+            }
+            // wiki/03 R5's lockout release (P4-b). Sent by `pam_sm_acct_mgmt` after the
+            // whole PAM stack has succeeded, so it means "somebody proved who they were" —
+            // by password, by face, by anything the stack accepted.
+            //
+            // It grants nothing and it is not an authenticator. The peer is already root by
+            // the time this runs (`serve::handle` checks `SO_PEERCRED` before the body is
+            // read), and a root peer that wanted to lie about this could delete the
+            // database instead.
+            Op::Clear => {
+                match limiter_of(self).clear(uid) {
+                    Ok(true) => audit::cleared(uid, &peer.describe()),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("<3>faciolockd: rate limiter: {e}"),
+                }
+                Some(Verdict::Ack)
             }
         }
     }
@@ -200,18 +256,48 @@ impl Daemon {
     /// The two `hung_up` checks bracket the two expensive stages — ~400 ms of capture and
     /// ~300 ms of inference. They are checks, not interrupts: a burst already in flight
     /// finishes (decision P3-b).
-    fn authenticate(&self, user: &str, peer: &Peer<'_>) -> Option<Verdict> {
+    /// The two `hung_up` checks bracket the two expensive stages — ~400 ms of capture and
+    /// ~300 ms of inference. They are checks, not interrupts: a burst already in flight
+    /// finishes (decision P3-b).
+    ///
+    /// Every path that returns `Some` goes through [`audit::attempt`] exactly once. A
+    /// cancelled request returns `None` and is logged as cancelled: nobody is waiting for an
+    /// answer and nothing was measured, so it is not an attempt and must not be counted
+    /// against the user's budget.
+    fn authenticate(&self, uid: u32, peer: &Peer<'_>) -> Option<Verdict> {
+        let started = Instant::now();
+        let who = peer.describe();
+
         if peer.hung_up() {
-            eprintln!("faciolockd: {user}: cancelled by {} before any work", peer.describe());
+            eprintln!("<6>faciolockd: uid {uid}: cancelled by {who} before any work");
             return None;
         }
 
-        let template = match store::load(&self.cfg.templates, user) {
+        // **Before the template load and before the camera.** A locked-out user costs one
+        // hash lookup, lights no emitter, and learns nothing about whether they are
+        // enrolled. `RateLimited` is not itself an attempt and does not extend the backoff.
+        let decision = limiter_of(self).decide(uid);
+        if decision.refused() {
+            audit::attempt(uid, &who, started.elapsed().as_millis(), None, Some(decision));
+            return Some(Verdict::RateLimited);
+        }
+
+        let template = match store::load(&self.cfg.templates, uid) {
             Ok(Some(t)) => t,
-            // Not enrolled is its own answer, and it is not a failed attempt.
-            Ok(None) => return Some(Verdict::NoEnrolment),
+            // Not enrolled is its own answer, and it is not a failed attempt. It is still
+            // an attempt, so R9 still wants a line — at info, because on a machine where
+            // nobody enrolled this is every lock screen and it must not train an operator
+            // to ignore the level.
+            Ok(None) => {
+                audit::not_enrolled(uid, &who, started.elapsed().as_millis());
+                return Some(Verdict::NoEnrolment);
+            }
             Err(e) => {
-                eprintln!("faciolockd: template store: {e}");
+                // A template that exists and does not decrypt is the interesting case here:
+                // damaged store, or somebody trying to implant one. It is an error, never a
+                // silent fall-through to the password prompt.
+                eprintln!("<3>faciolockd: template store: {e}");
+                audit::attempt(uid, &who, started.elapsed().as_millis(), None, None);
                 return Some(Verdict::Unavailable);
             }
         };
@@ -222,7 +308,8 @@ impl Daemon {
         let burst = match session_of(self).burst() {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("faciolockd: capture for {user}: {e}");
+                eprintln!("<4>faciolockd: capture for uid {uid}: {e}");
+                audit::attempt(uid, &who, started.elapsed().as_millis(), None, None);
                 return Some(Verdict::Unavailable);
             }
         };
@@ -231,34 +318,54 @@ impl Daemon {
         // part that matters — a caller that gave up must not keep the device from the next
         // one, or from a video call.
         if peer.hung_up() {
-            eprintln!("faciolockd: {user}: cancelled after capture, skipping inference");
+            eprintln!("<6>faciolockd: uid {uid}: cancelled after capture, skipping inference");
             return None;
         }
 
         let vision = *self.pipeline.config();
-        let frames = match Burst::from_planar(&burst.planar, burst.width, burst.height, &vision) {
-            Ok(b) => b,
-            Err(e) => {
-                let verdict = faciolock_vision::Verdict::from(e);
-                eprintln!("faciolockd: {user}: {verdict:?}");
-                return Some(serve::to_wire(&verdict));
-            }
+        let outcome = match Burst::from_planar(&burst.planar, burst.width, burst.height, &vision) {
+            Ok(frames) => self.pipeline.verify(&frames, &template),
+            // An unusable burst still produces a verdict, and the ambient gate lives in
+            // here — so it still gets an audit line and still goes through the counting
+            // rule below, which exempts it.
+            Err(e) => faciolock_vision::Outcome {
+                verdict: faciolock_vision::Verdict::from(e),
+                liveness: Default::default(),
+                face: None,
+                probes: 0,
+            },
         };
 
-        let outcome = self.pipeline.verify(&frames, &template);
-        // Phase 4 turns this into a structured journal entry with the liveness report and
-        // the peer credentials. For now it is one line, and it is the *detailed* verdict —
-        // the narrow one goes on the wire, because telling a caller which check rejected
-        // them is telling an attacker what to fix (wiki/04).
-        eprintln!(
-            "faciolockd: {user}: {:?} probes={} dropped={} discarded={} span={}ms",
-            outcome.verdict,
-            outcome.probes,
-            burst.dropped,
-            burst.discarded,
-            burst.sensor_span().as_millis()
-        );
+        self.record(uid, &outcome.verdict);
+        audit::attempt(uid, &who, started.elapsed().as_millis(), Some(&outcome), None);
         Some(serve::to_wire(&outcome.verdict))
+    }
+
+    /// Move the user's failure budget, and persist it **before the daemon replies**.
+    ///
+    /// Ordering is the point: a `kill -9` between the verdict and the answer must not roll
+    /// the counter back, or the budget is advisory. That is Phase 4's second exit criterion.
+    ///
+    /// What counts is [`counts_as_an_attempt`](faciolock_vision::Verdict::counts_as_an_attempt)
+    /// and nothing else — a bright room, a busy camera or a malformed burst never looked at
+    /// a face (P2-g). A write failure is logged and the answer still goes out: refusing to
+    /// answer because the budget could not be written would turn a full disk into a lockout.
+    fn record(&self, uid: u32, verdict: &faciolock_vision::Verdict) {
+        if !verdict.counts_as_an_attempt() {
+            return;
+        }
+        let mut limiter = limiter_of(self);
+        let outcome = match verdict.is_allow() {
+            true => limiter.clear(uid).map(|_| ()),
+            false => limiter.record_failure(uid).map(|d| {
+                if d == Decision::LockedOut {
+                    eprintln!("<3>faciolockd: uid {uid}: face unlock disabled until a successful password authentication");
+                }
+            }),
+        };
+        if let Err(e) = outcome {
+            eprintln!("<3>faciolockd: rate limiter: {e}");
+        }
     }
 
     /// Enrol from the command line.
@@ -274,6 +381,9 @@ impl Daemon {
         if Request::new(Op::Enroll, user, 0).is_err() {
             return fail(&format!("{user:?} is not a usable username"));
         }
+        let Some(uid) = users::uid_of(user) else {
+            return fail(&format!("no such user: {user}"));
+        };
 
         let burst = match session_of(&self).burst() {
             Ok(b) => b,
@@ -286,10 +396,16 @@ impl Daemon {
         };
 
         match enroll_template(&self.pipeline, &frames) {
-            Ok(template) => match store::save(&self.cfg.templates, user, &template) {
+            Ok(template) => match store::save(&self.cfg.templates, uid, &template) {
                 Ok(path) => {
+                    // A fresh enrolment clears whatever the old one accumulated. Otherwise
+                    // re-enrolling to fix a bad template would land the user straight back
+                    // in a lockout earned by the template they just replaced.
+                    if let Err(e) = limiter_of(&self).clear(uid) {
+                        eprintln!("<4>faciolockd: rate limiter: {e}");
+                    }
                     println!(
-                        "enrolled {user}: {} embeddings -> {}",
+                        "enrolled {user} (uid {uid}): {} embeddings -> {}",
                         template.len(),
                         path.display()
                     );

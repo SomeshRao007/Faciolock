@@ -26,8 +26,14 @@ pub struct Config {
     pub socket: PathBuf,
     /// Directory holding the ONNX models and their `MANIFEST.sha256`.
     pub models: PathBuf,
-    /// One file per enrolled user. Phase 4 replaces this with a uid-keyed, TPM-sealed store.
+    /// One encrypted file per enrolled uid, plus the key that decrypts them. The key lives
+    /// in this directory because it is the same trust domain: anything that can read one can
+    /// read the other, and pretending otherwise would be theatre (P4-a, wiki/03 R6).
     pub templates: PathBuf,
+    /// The persistent failure budget (wiki/03 R5). A **path**, not a policy — the backoff
+    /// and lockout numbers are hardcoded in `ratelimit.rs` for the reason this module's
+    /// header gives, and P4-c makes that explicit.
+    pub ratelimit: PathBuf,
     /// The **`by-path`** symlink for the IR camera, not `/dev/videoN` — the numbering
     /// renumbers across boots and `by-id` collides on the reference machine
     /// ([wiki/10 Probe 4]). `None` runs discovery on every open.
@@ -55,6 +61,7 @@ impl Default for Config {
             socket: PathBuf::from("/run/faciolock.sock"),
             models: PathBuf::from("/usr/share/faciolock/models"),
             templates: PathBuf::from("/var/lib/faciolock/templates"),
+            ratelimit: PathBuf::from("/var/lib/faciolock/ratelimit.db"),
             device: None,
             width: 640,
             height: 360,
