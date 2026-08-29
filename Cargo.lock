@@ -362,6 +362,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "faciolock-cli"
+version = "0.1.0"
+dependencies = [
+ "faciolock-camera",
+ "faciolock-ipc",
+ "libc",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "faciolock-daemon"
 version = "0.1.0"
 dependencies = [

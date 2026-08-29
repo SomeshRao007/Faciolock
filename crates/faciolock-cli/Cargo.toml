@@ -1,0 +1,29 @@
+[package]
+name = "faciolock-cli"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "faciolockctl"
+path = "src/main.rs"
+
+# `faciolock-pam` is deliberately absent, and so is `faciolock-daemon`. The CLI is a fourth
+# consumer of the socket, not a way into either of them: the rule wiki/04 exists to enforce is
+# that `cargo tree -p faciolock-pam` stays at `libc` + `faciolock-ipc`, and the cheapest way
+# to keep that true is for nothing to grow a path between the two binaries.
+#
+# `faciolock-camera` is here for `diagnose` alone — enumerating video nodes and taking a
+# read-only look at one. Nothing else in this crate opens a device.
+#
+# `serde` + `toml` are here to read the *daemon's* config file with the daemon's own parser.
+# The alternative was a pair of `--socket` / `--templates` flags defaulting to the same paths,
+# which is less code and silently wrong the moment a daemon is started with `--config`: the
+# CLI would report on a store nobody is using. Both crates are already in the lockfile and
+# already packaged in the archive, so this costs binary size and nothing else.
+[dependencies]
+faciolock-camera = { workspace = true }
+faciolock-ipc = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }

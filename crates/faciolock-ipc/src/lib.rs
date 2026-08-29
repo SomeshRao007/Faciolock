@@ -29,6 +29,18 @@ pub const VERSION: u8 = 1;
 /// a compile-time fact rather than a runtime check that could be forgotten.
 pub const MAX_USERNAME: usize = 32;
 
+/// How many poses a guided enrolment collects (Phase 5).
+///
+/// It lives here rather than in either binary because **both ends count**: `faciolockctl`
+/// prompts this many times and the daemon writes the template on the last one. Two constants
+/// that must agree are one constant, or the CLI stops prompting a pose early and the daemon
+/// waits forever for a request that is never sent.
+///
+/// The response is four fixed bytes and carries no "how many left" field, deliberately —
+/// [`Response`] is parsed by the PAM module in a root process and Phase 5 changes nothing
+/// about it.
+pub const ENROL_POSES: usize = 3;
+
 /// `version | op | timeout_ms | username_len` before the name itself.
 const HEADER: usize = 5;
 
