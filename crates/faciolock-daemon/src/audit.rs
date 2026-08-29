@@ -127,6 +127,41 @@ pub fn cleared(uid: u32, peer: &str) {
     emit(NOTICE, &format!("clear uid={uid} event=lockout-cleared {peer}"));
 }
 
+/// One pose of a guided enrolment (Phase 5).
+///
+/// **Enrolment is a write to the template store**, so R9's one-line-per-attempt rule applies
+/// to it at least as hard as to authentication. A3 is about a template that was *implanted*;
+/// a template that appeared with nothing in the journal saying who wrote it, from what peer,
+/// and when, is that attack with the evidence already deleted.
+///
+/// `refused` is `None` for a pose that was captured. `poses` is the count *after* this one,
+/// so a reader can see an enrolment progress and can see one that stalled.
+pub fn enrol_pose(uid: u32, peer: &str, elapsed_ms: u128, poses: usize, refused: Option<&Verdict>) {
+    let (priority, reason) = match refused {
+        None => (INFO, "reason=captured".to_string()),
+        Some(v) => (priority_of(v), detail_of(v)),
+    };
+    emit(
+        priority,
+        &format!(
+            "enrol uid={uid} pose={poses}/{} {reason} {peer} elapsed={elapsed_ms}",
+            faciolock_ipc::ENROL_POSES
+        ),
+    );
+}
+
+/// The store was written. At notice, next to the other line that means a template now
+/// decides who gets in — a successful match.
+pub fn enrolled(uid: u32, peer: &str, embeddings: usize) {
+    emit(
+        NOTICE,
+        &format!(
+            "enrol uid={uid} event=template-written poses={} embeddings={embeddings} {peer}",
+            faciolock_ipc::ENROL_POSES
+        ),
+    );
+}
+
 /// `<N>` is the syslog priority; systemd strips it off stderr and the rest is the line.
 /// The caller supplies its own event word, so `journalctl … | grep 'faciolockd: auth'`
 /// selects attempts and nothing else.
