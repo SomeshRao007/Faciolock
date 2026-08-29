@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use faciolock_camera::Geometry;
+use faciolock_vision::Tier;
 use serde::Deserialize;
 
 /// Everything the daemon reads from disk at startup.
@@ -40,6 +41,20 @@ pub struct Config {
     ///
     /// [wiki/10 Probe 4]: ../../../wiki/10-hardware-probe.md
     pub device: Option<PathBuf>,
+    /// Which illumination this machine's camera provides: `ir-strobe`, `ir-constant` or
+    /// `rgb`. Observed once by `faciolockctl diagnose` and written here.
+    ///
+    /// **This is the one security-relevant value in this file, and it is here because P1-e
+    /// says it must be.** The tier decides which liveness checks apply, and inferring it from
+    /// the burst being authenticated would let an attacker with a bright enough continuous IR
+    /// source wash out the ON/OFF separation and *demote* the machine to a tier whose checks
+    /// they can pass. Configured means an operator chose it; a burst that does not conform is
+    /// a reject, not a downgrade.
+    ///
+    /// A `String` rather than [`faciolock_vision::Tier`] because that crate has no `serde`
+    /// and must not gain one — its dependency count is a security claim (wiki/04). Parsed by
+    /// [`Config::tier`], which refuses an unknown value rather than defaulting.
+    pub tier: String,
     pub width: u32,
     pub height: u32,
     /// Frames per authentication burst. Six gives three ON/OFF pairs against a `min_pairs`
@@ -63,6 +78,10 @@ impl Default for Config {
             templates: PathBuf::from("/var/lib/faciolock/templates"),
             ratelimit: PathBuf::from("/var/lib/faciolock/ratelimit.db"),
             device: None,
+            // Matches `faciolock_vision::Config::default().tier`. The two defaults are
+            // spelled separately because the crates do not share a config format, and
+            // `defaults_agree_with_the_vision_crate` below is what keeps them equal.
+            tier: "ir-strobe".into(),
             width: 640,
             height: 360,
             burst_frames: 6,
@@ -85,6 +104,23 @@ impl Config {
             Err(e) => return Err(format!("{}: {e}", path.display())),
         };
         toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Parse [`tier`](Config::tier), refusing anything unrecognised.
+    ///
+    /// A typo must not silently take a default here of all places: `rgb` and `ir-strobe`
+    /// enforce different checks, so a machine running the wrong one is a machine whose
+    /// liveness nobody chose. `deny_unknown_fields` gives that guarantee for the *key*; this
+    /// gives it for the value.
+    pub fn tier(&self) -> Result<Tier, String> {
+        match self.tier.as_str() {
+            "ir-strobe" => Ok(Tier::IrStrobe),
+            "ir-constant" => Ok(Tier::IrConstant),
+            "rgb" => Ok(Tier::Rgb),
+            other => Err(format!(
+                "tier = {other:?} is not one of ir-strobe, ir-constant, rgb"
+            )),
+        }
     }
 
     pub fn geometry(&self) -> Geometry {
@@ -115,5 +151,34 @@ mod tests {
         let typo = dir.join("typo.toml");
         std::fs::write(&typo, "burst_frame = 6").expect("write");
         assert!(Config::load(&typo).is_err(), "an unknown key must be refused");
+    }
+
+    /// The tier decides which liveness checks run, so an unreadable value must stop the
+    /// daemon rather than quietly select one. `deny_unknown_fields` covers the key; this is
+    /// the value.
+    #[test]
+    fn an_unknown_tier_is_refused_rather_than_defaulted() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.tier().expect("the default parses"), Tier::IrStrobe);
+
+        for good in [("ir-constant", Tier::IrConstant), ("rgb", Tier::Rgb)] {
+            cfg.tier = good.0.into();
+            assert_eq!(cfg.tier().expect(good.0), good.1);
+        }
+        for bad in ["ir_strobe", "IR-STROBE", "strobe", ""] {
+            cfg.tier = bad.into();
+            assert!(cfg.tier().is_err(), "{bad:?} must not resolve to a tier");
+        }
+    }
+
+    /// Two crates spell this default separately because they share no config format. They
+    /// must still agree, or a machine with no `tier =` line runs different checks than the
+    /// vision crate's own tests do.
+    #[test]
+    fn defaults_agree_with_the_vision_crate() {
+        assert_eq!(
+            Config::default().tier().expect("parses"),
+            faciolock_vision::Config::default().tier
+        );
     }
 }

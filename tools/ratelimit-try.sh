@@ -180,10 +180,13 @@ cat <<'NOTE'
   script can produce is exempt from counting by design (`counts_as_an_attempt`), because
   reaching a counting one needs a face in front of a real camera. With an enrolment:
 
-    sudo ./target/debug/faciolockd --enroll "$USER"
-    sudo ./target/sock-try /run/faciolock.sock auth "$USER"   # x3, face visible
+    sudo ./target/debug/faciolockctl enroll "$USER"            # three poses
+    sudo ./target/sock-try /run/faciolock.sock auth "$USER"    # x3, a DIFFERENT face
     journalctl -t faciolockd | grep counted=1
     cat /var/lib/faciolock/ratelimit.db                        # failures climbing to 3
+
+  Use sock-try rather than `faciolockctl test` for that last part: `test` clears the budget
+  when it finishes, which is the whole point of it and the opposite of what this measures.
 NOTE
 
 echo

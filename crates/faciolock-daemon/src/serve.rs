@@ -299,14 +299,35 @@ pub fn status(enrolled: bool) -> Verdict {
     if enrolled { Verdict::Deny } else { Verdict::NoEnrolment }
 }
 
-/// Enrolment does not happen over this socket in Phase 2.
+/// What an enrolment pose that produced no embeddings tells the caller.
 ///
-/// An unauthenticated enrolment endpoint is a write to the template store from anyone who
-/// can reach the socket — an unlock, not a feature. It needs `SO_PEERCRED` (Phase 3) and
-/// polkit (Phase 5) underneath it. Until then enrolment is `faciolockd --enroll`, which
-/// requires local execution and write access to the store already.
-pub fn enroll_over_the_wire() -> Verdict {
-    Verdict::Unavailable
+/// **Reached only on failure**, and it can return neither `Allow` nor `Ack` — those are the
+/// two answers that mean something worked. `Allow`'s single construction site stays
+/// [`to_wire`]'s `Match` arm; `Ack`'s stays the two success paths in `Daemon::enrol`.
+///
+/// This is where Phase 2's refusal went. That refusal was right for its phase — an
+/// unauthenticated enrolment endpoint is a store write available to anyone who can reach the
+/// socket — and its doc comment named the two preconditions: `SO_PEERCRED` (Phase 3, done)
+/// and polkit (Phase 5, done). Both hold now, so enrolment is a real operation and this
+/// function reports why a pose was rejected instead of refusing the op wholesale.
+///
+/// The split is the same one [`to_wire`] makes and it means the same thing: `Deny` is a pose
+/// the pipeline looked at and refused, `Unavailable` is a pose it could not judge — a bright
+/// room ([B18]), a camera in a video call. The CLI renders them differently because the user
+/// can act on them differently.
+///
+/// [B18]: ../../../wiki/11-bug-log.md
+pub fn enrol_failure(verdict: &faciolock_vision::Verdict) -> Verdict {
+    use faciolock_vision::Verdict as V;
+    match verdict {
+        // `Pipeline::enroll` never matches against anything, so the two matching verdicts
+        // are unreachable here. They are named rather than caught by a wildcard for the
+        // reason every match in this file is exhaustive: a `Match` that fell into a
+        // catch-all next to `Allow` is exactly the bug the discipline exists to prevent.
+        V::Match { .. } | V::NoMatch { .. } => Verdict::Deny,
+        V::NotLive { .. } | V::NoFace => Verdict::Deny,
+        V::Environment { .. } | V::Unusable(_) | V::Failed(_) => Verdict::Unavailable,
+    }
 }
 
 #[cfg(test)]
@@ -331,7 +352,34 @@ mod tests {
         }
         assert!(!status(true).is_allow(), "Status must never grant");
         assert!(!status(false).is_allow());
-        assert!(!enroll_over_the_wire().is_allow());
+    }
+
+    /// Enrolment writes the template store, so no answer it can produce may be an allow —
+    /// and none may be an `Ack` either, because `Ack` is what the CLI counts as a captured
+    /// pose. A failure that read as a success would finish an enrolment on three refusals.
+    #[test]
+    fn no_enrolment_failure_is_a_success_of_any_kind() {
+        for refused in [
+            V::NoMatch { best: 0.9 },
+            V::Match { similarity: 0.9, agreeing: 2 },
+            V::NotLive { check: Check::DarkFrame, worst: 1.0, threshold: 1e-3 },
+            V::NoFace,
+            V::Environment { ambient_floor: 51.74 },
+            V::Unusable(BurstError::Malformed),
+            V::Failed("camera vanished".into()),
+        ] {
+            let wire = enrol_failure(&refused);
+            assert!(!wire.is_allow(), "{refused:?} must not reach Allow");
+            assert_ne!(wire, Verdict::Ack, "{refused:?} must not read as a captured pose");
+        }
+    }
+
+    /// The same split `to_wire` makes, for the same reason: the CLI tells the user to move
+    /// closer for one and to close the blinds for the other.
+    #[test]
+    fn an_unjudgeable_pose_is_distinguishable_from_a_refused_one() {
+        assert_eq!(enrol_failure(&V::NoFace), Verdict::Deny);
+        assert_eq!(enrol_failure(&V::Environment { ambient_floor: 85.44 }), Verdict::Unavailable);
     }
 
     /// A `Deny` for an unreadable request and an `Unavailable` for an unanswerable one are

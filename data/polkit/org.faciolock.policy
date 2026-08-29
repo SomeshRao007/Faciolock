@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+
+<!--
+  Installed to /usr/share/polkit-1/actions/ (Phase 7).
+
+  One action, not one per subcommand, because pkexec gates the *program*: the annotation
+  below names an executable, and pkexec re-executes it with the arguments it was given.
+  There is no way to write "enrol needs admin but list does not" here, and pretending
+  otherwise by adding four action ids that all point at the same binary would look like a
+  boundary without being one.
+
+  auth_admin, deliberately not auth_admin_keep. `_keep` caches the authorisation for about
+  five minutes, and the thing being authorised is `faciolockctl enroll` -- which writes a
+  face into the template store. Anyone reaching an unlocked session inside that window could
+  enrol their own face without typing anything. Five minutes of convenience is not worth a
+  window in which the machine can be taught a new owner, so every invocation asks.
+-->
+<policyconfig>
+  <vendor>Faciolock</vendor>
+  <vendor_url>https://github.com/SomeshRao007/Faciolock</vendor_url>
+
+  <action id="org.faciolock.manage">
+    <description>Manage Faciolock face enrolments</description>
+    <message>Authentication is required to manage face unlock</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/faciolockctl</annotate>
+  </action>
+</policyconfig>
