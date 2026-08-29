@@ -33,7 +33,8 @@ design Debian already ships and trusts.
                             │
 ┌───────────────────────────┴──────────────────────────────────┐
 │  faciolockctl (CLI)  — enroll, list, remove, test, diagnose  │
-│  polkit-gated; talks to the same daemon over the same socket │
+│  polkit-gated, runs as root. enroll/test/bench go over the   │
+│  socket; list/remove read the template directory (P5-b)      │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -83,7 +84,15 @@ Alternative considered: **D-Bus**, which is what `fprintd` uses. Trade-off:
 The security argument favours the raw socket; the integration argument favours D-Bus.
 A defensible hybrid: **PAM module ↔ daemon over the raw socket** (hot path, root,
 must be minimal), **CLI/settings-UI ↔ daemon over D-Bus** (cold path, unprivileged,
-wants ecosystem integration). Decision deferred to [08](08-open-questions.md).
+wants ecosystem integration). ~~Decision deferred to [08](08-open-questions.md).~~
+
+**Decided 2026-08-23 against the hybrid** ([08 Q4](08-open-questions.md#q4--ipc-raw-unix-socket-d-bus-or-both--decided-2026-08-23-raw-socket-only),
+P5-a). One surface: `faciolockctl` speaks this socket, as root, gated by polkit at the
+`pkexec` boundary. The hybrid's payoff was richer enrolment feedback, and the existing
+verdicts already separate the two things a person can act on — `Deny` means it looked and
+refused, `Unavailable` means it could not judge. That is "move closer" versus "close the
+blinds" with no new protocol, and it is not worth `zbus` in the process that parses V4L2
+buffers.
 
 ### Protocol
 
@@ -110,6 +119,19 @@ sends the op after the PAM stack has succeeded, the daemon forgets that user's f
 `Ack` is the acknowledgement. It authorises nothing — `Ack` is enumerated in the same
 exhaustive `is_allow` match as everything else precisely so it cannot become an allow by
 being forgotten.
+
+**`Enroll` became a real operation in Phase 5, with no change to these bytes.** It was
+refused outright until then because an unauthenticated enrolment endpoint is a store write
+available to anyone who can reach the socket; the two preconditions it was waiting on —
+`SO_PEERCRED` and polkit — now both exist. One request captures **one pose**; the daemon
+accumulates and writes the template on the last one. `faciolock_ipc::ENROL_POSES` is how many,
+and it lives in the shared crate because both ends count: the CLI prompts that many times and
+the daemon finalises on that number, so two constants that must agree are one constant.
+
+The reply reuses the verdicts already defined: `Ack` for a captured pose, `Deny` for one the
+pipeline looked at and refused, `Unavailable` for one it could not judge. **There is no
+"poses remaining" field and there must not be** — `Response` is parsed by a module loaded
+into `sudo` and `login`, and enrolment is not a good enough reason to touch that parser.
 
 **The failure-budget policy is deliberately not on the wire.** What crosses is a *category*;
 what to do about it is decided in the daemon. [B20](11-bug-log.md#b20) reopened the
@@ -150,11 +172,22 @@ dependency tree of exactly `libc` and `faciolock-ipc`.** That is auditable in a
 check. If a dependency ever appears there, the review is over.
 
 **`faciolock-store` was planned and is not being built** (decision P4-d). The store is
-`faciolock-daemon/src/store.rs`, because it has exactly one consumer: Phase 5's
-`faciolockctl` reaches the store through the socket like everything else, not by linking it.
-A crate with one consumer is a boundary that has to be maintained and buys nothing. The rule
-above is unaffected — it is about what `faciolock-pam` depends on, and the store is not in
-that tree either way.
+`faciolock-daemon/src/store.rs`, because it has exactly one consumer. A crate with one
+consumer is a boundary that has to be maintained and buys nothing. The rule above is
+unaffected — it is about what `faciolock-pam` depends on, and the store is not in that tree
+either way.
+
+**Phase 5 corrected the second half of that sentence.** P4-d used to add "`faciolockctl`
+reaches the store through the socket like everything else, not by linking it", and the first
+clause did not survive contact with `list`. A list of enrolled uids is a variable-length
+answer and `Response` is four fixed bytes parsed inside a root PAM process; carrying it would
+mean growing that parser for the least security-sensitive feature in the project.
+
+So the CLI **reads the template directory and never its contents** (P5-b). A filename is a
+uid, a mtime is a date, `remove` is an unlink — and reaching any of it requires being root,
+which is a strictly larger capability than the unlink. Nothing links `store.rs`, decrypts
+anything or reads the key, so the property P4-d actually protects is intact: the store has
+one consumer and the format has one implementation.
 
 `chacha20poly1305` is the only dependency Phase 4 added, daemon-only, and it is packaged in
 the archive at the version pinned here.
@@ -173,6 +206,9 @@ worth nothing.
 ```
 /usr/lib/security/pam_faciolock.so           root:root            0644
 /usr/libexec/faciolockd                      root:root            0755
+/usr/bin/faciolockctl                        root:root            0755  (P5-a; polkit-gated)
+/usr/share/polkit-1/actions/
+                 org.faciolock.policy        root:root            0644
 /usr/share/faciolock/models/*.onnx           root:root            0644  (+ SHA256SUMS)
 /etc/faciolock/faciolockd.toml               root:root            0644
 /var/lib/faciolock/                          faciolock:faciolock  0700
@@ -205,6 +241,20 @@ resolved once by `faciolockctl diagnose`. Not `videoN` (renumbers across boots) 
 interfaces of the same USB device and resolves to the wrong camera
 ([10/Probe 4](10-hardware-probe.md#probe-4--device-node-disambiguation)). The daemon
 re-verifies the format and geometry on open regardless of what the config says.
+
+**The capability tier is written next to it, by the same command** (Phase 5). It is the one
+security-relevant value in that file, and it is in a file rather than inferred because P1-e
+says it must be: inferring the tier from the burst being authenticated would let an attacker
+with a bright enough continuous IR source wash out the ON/OFF separation and *demote* the
+machine to a tier whose checks they can pass.
+
+`diagnose` therefore only ever asserts a tier **upward**. It reports `ir-strobe` when it
+observes a clean strobe and writes nothing at all otherwise — because the measurement that
+says "no strobe here" and the measurement that says "somebody is pointing a floodlight at
+this" are the same measurement, and [B18](11-bug-log.md#b18) showed ordinary daylight
+produces it. A machine with a genuinely constant emitter needs a human to write
+`tier = "ir-constant"` by hand. `--write` also refuses to overwrite an existing config, so a
+diagnostic run in a bright room cannot rewrite a working machine.
 
 ## Failure behaviour
 

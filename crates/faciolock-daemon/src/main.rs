@@ -33,10 +33,10 @@ mod users;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use faciolock_ipc::{Op, Request, Verdict};
-use faciolock_vision::{Burst, Config as VisionConfig, Pipeline, pipeline::enroll_template};
+use faciolock_ipc::{ENROL_POSES, Op, Request, Verdict};
+use faciolock_vision::{Burst, Config as VisionConfig, Embedding, Pipeline, Template};
 
 use config::Config;
 use ratelimit::{Decision, Limiter};
@@ -48,8 +48,11 @@ const DEFAULT_CONFIG: &str = "/etc/faciolock/faciolockd.toml";
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut config_path = PathBuf::from(DEFAULT_CONFIG);
-    let mut enroll_as: Option<String> = None;
 
+    // `--enroll USERNAME` was here and is gone (Phase 5). It existed to make `Op::Auth`
+    // testable before there was any way to enrol, and its own comment said so; enrolment is
+    // now `faciolockctl enroll`, over the socket, guided, and audited. Keeping both would
+    // mean two capture-and-store paths to hold in sync, one of which nobody runs.
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -57,12 +60,8 @@ fn main() -> ExitCode {
                 Some(v) => config_path = PathBuf::from(v),
                 None => return fail("--config needs a path"),
             },
-            "--enroll" => match it.next() {
-                Some(v) => enroll_as = Some(v.clone()),
-                None => return fail("--enroll needs a username"),
-            },
             "--help" | "-h" => {
-                println!("faciolockd [--config PATH] [--enroll USERNAME]");
+                println!("faciolockd [--config PATH]");
                 return ExitCode::SUCCESS;
             }
             other => return fail(&format!("unknown argument {other}")),
@@ -70,10 +69,7 @@ fn main() -> ExitCode {
     }
 
     match start(&config_path) {
-        Ok(daemon) => match enroll_as {
-            Some(user) => daemon.enroll_locally(&user),
-            None => daemon.serve(),
-        },
+        Ok(daemon) => daemon.serve(),
         Err(e) => fail(&e),
     }
 }
@@ -93,6 +89,12 @@ fn start(config_path: &Path) -> Result<Daemon, String> {
     models::verify(&cfg.models)?;
 
     let mut vision = VisionConfig::default();
+
+    // P1-e: the capability tier is enrolment-time configuration, never inferred from the
+    // burst being authenticated — inferring it per burst would let an attacker with a bright
+    // enough continuous IR source *demote* the machine to a tier whose checks they can pass.
+    // `faciolockctl diagnose` observes it once and writes it here.
+    vision.tier = cfg.tier()?;
 
     // **The settle discard belongs to exactly one layer, and for live capture it is the
     // camera's.** `VisionConfig::agc_settle_frames` defaults to 5 because the corpus
@@ -126,6 +128,7 @@ fn start(config_path: &Path) -> Result<Daemon, String> {
     Ok(Daemon {
         session: Arc::new(Mutex::new(Session::new(cfg.clone()))),
         limiter,
+        pending: Mutex::new(None),
         pipeline,
         cfg,
     })
@@ -138,8 +141,59 @@ pub struct Daemon {
     /// the daemon is serial today, but the warm thread already shares the process and
     /// Phase 6 may add more.
     limiter: Mutex<Limiter>,
+    /// A guided enrolment in progress, if any. One at a time — there is one camera.
+    pending: Mutex<Option<Pending>>,
     pipeline: Pipeline,
     cfg: Config,
+}
+
+/// How long a half-finished enrolment survives **without a new pose arriving**.
+///
+/// Long enough to find your glasses between poses, short enough that a session somebody
+/// walked away from does not sit waiting to have the next person's face appended to it.
+///
+/// It is a gap, not a total, and that distinction is load-bearing. As a total it silently
+/// breaks a slow enrolment: two poses accepted, a minute of fumbling, and the third arrives
+/// to a `Pending` that has expired — so the daemon starts over and answers `Ack`, the CLI
+/// counts its third `Ack` and reports success, and no template was ever written. The user
+/// finds out at a lock screen. Measured from the last pose instead, "abandoned" means what it
+/// sounds like: nobody has sent anything for a minute.
+const ENROL_EXPIRY: Duration = Duration::from_secs(60);
+
+/// Poses collected so far, and by whom.
+///
+/// **The daemon accumulates, not the CLI.** The camera, the models and the store are all on
+/// this side; a CLI that gathered embeddings and handed them back would make the store write
+/// a function of the peer's bytes, which is precisely what `Op::Enroll` used to be refused
+/// for. What crosses the socket stays "capture a pose" and "here is what I saw".
+struct Pending {
+    uid: u32,
+    /// Every embedding from every pose. wiki/05 matches best-of over the enrolled set and
+    /// the poses exist to put variation into it, so nothing is thinned here — the near
+    /// duplicates within one pose cost a cosine each and the across-pose spread is the
+    /// entire point of asking for three.
+    embeddings: Vec<Embedding>,
+    poses: usize,
+    /// When the most recent pose landed, not when the enrolment began. See [`ENROL_EXPIRY`].
+    touched: Instant,
+}
+
+impl Pending {
+    fn fresh(uid: u32) -> Pending {
+        Pending { uid, embeddings: Vec::new(), poses: 0, touched: Instant::now() }
+    }
+
+    /// Whether this belongs to the request now being answered. A different uid or an
+    /// abandoned session starts over rather than inheriting somebody else's poses.
+    fn belongs_to(&self, uid: u32) -> bool {
+        self.uid == uid && self.touched.elapsed() < ENROL_EXPIRY
+    }
+
+    fn record(&mut self, embeddings: Vec<Embedding>) {
+        self.embeddings.extend(embeddings);
+        self.poses += 1;
+        self.touched = Instant::now();
+    }
 }
 
 /// A poisoned lock means the warm thread panicked mid-burst.
@@ -161,6 +215,13 @@ fn session_of(daemon: &Daemon) -> std::sync::MutexGuard<'_, Session> {
 /// denial of service reachable by whatever caused the panic.
 fn limiter_of(daemon: &Daemon) -> std::sync::MutexGuard<'_, Limiter> {
     daemon.limiter.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Recovered rather than propagated, like the two above. The worst a poisoned lock can hold
+/// here is a partial enrolment, and a partial enrolment is already something the next pose is
+/// allowed to discard.
+fn pending_of(daemon: &Daemon) -> std::sync::MutexGuard<'_, Option<Pending>> {
+    daemon.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl Daemon {
@@ -230,10 +291,7 @@ impl Daemon {
                     .is_some();
                 Some(serve::status(enrolled))
             }
-            Op::Enroll => {
-                eprintln!("<4>faciolockd: refused enrolment over the socket for uid {uid}");
-                Some(serve::enroll_over_the_wire())
-            }
+            Op::Enroll => self.enrol(uid, peer),
             // wiki/03 R5's lockout release (P4-b). Sent by `pam_sm_acct_mgmt` after the
             // whole PAM stack has succeeded, so it means "somebody proved who they were" —
             // by password, by face, by anything the stack accepted.
@@ -368,52 +426,185 @@ impl Daemon {
         }
     }
 
-    /// Enrol from the command line.
+    /// One pose of a guided enrolment (Phase 5). `faciolockctl` sends [`ENROL_POSES`] of
+    /// these and the last one writes the template.
     ///
-    /// ponytail: the smallest thing that makes `Op::Auth` testable end to end. Phase 5's
-    /// `faciolockctl enroll` replaces it with guided multi-capture and quality feedback;
-    /// this takes one burst and accepts whatever the liveness gate lets through — which is
-    /// the same gate verification uses, deliberately, because enrolling from a photograph
-    /// would poison the store permanently.
-    fn enroll_locally(self, user: &str) -> ExitCode {
-        // Reuse the wire's charset rule rather than re-implementing it: a username that
-        // could never arrive over the socket must not be enrollable from argv either.
-        if Request::new(Op::Enroll, user, 0).is_err() {
-            return fail(&format!("{user:?} is not a usable username"));
+    /// **The liveness gate is verification's gate, unchanged.** `Pipeline::enroll` runs the
+    /// same checks `verify` runs, deliberately: a template enrolled from a photograph would
+    /// poison the store permanently, and it would do so silently. The honest limit on that
+    /// today is [B24] — a flat printed face clears every check the tier enforces — which is
+    /// a liveness problem rather than an enrolment one, and it is not hidden here.
+    ///
+    /// **No path in here touches the failure budget.** Enrolment is not an authentication
+    /// attempt, and the peer is root by the time this runs.
+    ///
+    /// [B24]: ../../../wiki/11-bug-log.md
+    fn enrol(&self, uid: u32, peer: &Peer<'_>) -> Option<Verdict> {
+        let started = Instant::now();
+        let who = peer.describe();
+
+        if peer.hung_up() {
+            eprintln!("<6>faciolockd: uid {uid}: enrolment cancelled by {who} before any work");
+            return None;
         }
-        let Some(uid) = users::uid_of(user) else {
-            return fail(&format!("no such user: {user}"));
+
+        let burst = match session_of(self).burst() {
+            Ok(b) => b,
+            Err(e) => {
+                let refused = faciolock_vision::Verdict::Failed(e.to_string());
+                let ms = started.elapsed().as_millis();
+                audit::enrol_pose(uid, &who, ms, self.poses_so_far(uid), Some(&refused));
+                return Some(serve::enrol_failure(&refused));
+            }
         };
 
-        let burst = match session_of(&self).burst() {
-            Ok(b) => b,
-            Err(e) => return fail(&format!("capture: {e}")),
-        };
+        // Same bracket as `authenticate`: the camera is released by returning here, and a
+        // caller that gave up must not hold it away from the next one or from a video call.
+        if peer.hung_up() {
+            eprintln!("<6>faciolockd: uid {uid}: enrolment cancelled after capture");
+            return None;
+        }
+
         let vision = *self.pipeline.config();
-        let frames = match Burst::from_planar(&burst.planar, burst.width, burst.height, &vision) {
-            Ok(b) => b,
-            Err(e) => return fail(&format!("{:?}", faciolock_vision::Verdict::from(e))),
+        let captured = match Burst::from_planar(&burst.planar, burst.width, burst.height, &vision) {
+            Ok(frames) => self.pipeline.enroll(&frames).map_err(|o| o.verdict),
+            Err(e) => Err(faciolock_vision::Verdict::from(e)),
         };
 
-        match enroll_template(&self.pipeline, &frames) {
-            Ok(template) => match store::save(&self.cfg.templates, uid, &template) {
-                Ok(path) => {
-                    // A fresh enrolment clears whatever the old one accumulated. Otherwise
-                    // re-enrolling to fix a bad template would land the user straight back
-                    // in a lockout earned by the template they just replaced.
-                    if let Err(e) = limiter_of(&self).clear(uid) {
-                        eprintln!("<4>faciolockd: rate limiter: {e}");
-                    }
-                    println!(
-                        "enrolled {user} (uid {uid}): {} embeddings -> {}",
-                        template.len(),
-                        path.display()
-                    );
-                    ExitCode::SUCCESS
-                }
-                Err(e) => fail(&e),
-            },
-            Err(outcome) => fail(&format!("{:?}", outcome.verdict)),
+        // Taken out of the slot rather than borrowed in it, so the finalise path below can
+        // consume the embeddings without a second lookup. Every early return puts it back.
+        let mut slot = pending_of(self);
+        let mut pending = match slot.take() {
+            Some(p) if p.belongs_to(uid) => p,
+            // A different user, or a session nobody came back to. Starting over is the only
+            // safe reading: appending this pose to someone else's poses would build a
+            // template out of two faces.
+            _ => Pending::fresh(uid),
+        };
+
+        let embeddings = match captured {
+            Ok(e) => e,
+            Err(verdict) => {
+                let ms = started.elapsed().as_millis();
+                audit::enrol_pose(uid, &who, ms, pending.poses, Some(&verdict));
+                *slot = Some(pending);
+                return Some(serve::enrol_failure(&verdict));
+            }
+        };
+
+        pending.record(embeddings);
+        audit::enrol_pose(uid, &who, started.elapsed().as_millis(), pending.poses, None);
+
+        if pending.poses < ENROL_POSES {
+            *slot = Some(pending);
+            return Some(Verdict::Ack);
         }
+
+        // Last pose. `pending` is dropped from here on whatever happens — a failed write must
+        // not leave two poses behind for the next request to append a third to.
+        //
+        // The slot is released before the store write so no path in this daemon ever holds
+        // the pending lock and the limiter lock at once. Serial today, and a lock ordering
+        // that does not exist cannot be got wrong later.
+        drop(slot);
+
+        let Some(template) = Template::new(self.pipeline.embedder_id(), pending.embeddings) else {
+            eprintln!("<3>faciolockd: uid {uid}: enrolment collected no embeddings");
+            return Some(Verdict::Unavailable);
+        };
+        let embeddings = template.len();
+
+        match store::save(&self.cfg.templates, uid, &template) {
+            Ok(_) => {
+                // A fresh enrolment clears whatever the old one accumulated. Otherwise
+                // re-enrolling to fix a bad template would land the user straight back in a
+                // lockout earned by the template they just replaced.
+                if let Err(e) = limiter_of(self).clear(uid) {
+                    eprintln!("<4>faciolockd: rate limiter: {e}");
+                }
+                audit::enrolled(uid, &who, embeddings);
+                Some(Verdict::Ack)
+            }
+            Err(e) => {
+                eprintln!("<3>faciolockd: template store: {e}");
+                Some(Verdict::Unavailable)
+            }
+        }
+    }
+
+    /// Poses recorded for this user, or zero if the last one was somebody else's or has
+    /// expired. For the audit line on a pose that never reached the pending state.
+    fn poses_so_far(&self, uid: u32) -> usize {
+        pending_of(self).as_ref().filter(|p| p.belongs_to(uid)).map_or(0, |p| p.poses)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Daemon::enrol` needs a camera, two models and a store, so what is testable without
+    /// hardware is the rule it turns on: whether a pose in hand belongs to the enrolment
+    /// already in progress. Both ways of getting that wrong build a template out of two
+    /// people, which is the failure this exists to prevent.
+    #[test]
+    fn a_pose_only_joins_an_enrolment_it_belongs_to() {
+        let pending = Pending::fresh(1000);
+        assert!(pending.belongs_to(1000));
+        assert!(!pending.belongs_to(1001), "another user's pose must not be appended");
+        assert!(!pending.belongs_to(0));
+    }
+
+    /// A session somebody walked away from must not sit waiting to have the next person's
+    /// face added to it. `checked_sub` rather than a sleep, so the test costs nothing.
+    #[test]
+    fn an_abandoned_enrolment_expires_rather_than_waiting_forever() {
+        let mut stale = Pending::fresh(1000);
+        let past = Instant::now().checked_sub(ENROL_EXPIRY + Duration::from_secs(1));
+        stale.touched = match past {
+            Some(t) => t,
+            // A monotonic clock younger than the expiry window — a machine up for under a
+            // minute. Nothing to assert then, and skipping beats asserting something false.
+            None => return,
+        };
+        assert!(!stale.belongs_to(1000), "an expired enrolment must not accept a fourth pose");
+
+        let fresh = Pending::fresh(1000);
+        assert!(fresh.belongs_to(1000));
+    }
+
+    /// **The expiry is a gap between poses, not a budget for the whole enrolment.**
+    ///
+    /// As a total it fails silently and in the worst direction: the third pose arrives to an
+    /// expired `Pending`, the daemon starts over and answers `Ack`, the CLI counts its third
+    /// `Ack` and says "Enrolled", and no template exists. The user finds out at a lock
+    /// screen. A pose landing has to push the deadline out.
+    #[test]
+    fn a_slow_enrolment_survives_as_long_as_poses_keep_arriving() {
+        let mut pending = Pending::fresh(1000);
+        let Some(past) = Instant::now().checked_sub(ENROL_EXPIRY - Duration::from_secs(1)) else {
+            return; // clock younger than the window; nothing to assert
+        };
+
+        // Two poses in, and the enrolment began just inside the window.
+        pending.touched = past;
+        assert!(pending.belongs_to(1000), "still alive, barely");
+
+        // A pose lands. That must reset the clock, not merely be recorded.
+        pending.record(Vec::new());
+        assert_eq!(pending.poses, 1);
+        assert!(
+            pending.touched.elapsed() < Duration::from_secs(1),
+            "a pose must push the deadline out, or a slow enrolment silently restarts"
+        );
+        assert!(pending.belongs_to(1000));
+    }
+
+    /// The count the daemon finalises on is the count the CLI prompts for. They are the same
+    /// constant precisely so this cannot drift, and the shared crate is where it lives.
+    #[test]
+    fn the_finalise_point_is_the_shared_constant() {
+        assert!(ENROL_POSES >= 2, "one pose is what the flag this replaced already did");
+        assert_eq!(ENROL_POSES, faciolock_ipc::ENROL_POSES);
     }
 }

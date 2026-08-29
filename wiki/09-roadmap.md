@@ -198,9 +198,10 @@ is cheap to keep.
 | Remote session → refused **before** any IPC | **observed**, 0.2–0.4 ms, and the daemon's log did not grow by a line while it was up and demonstrably reachable — which is the only way to show an absence |
 | Daemon gone between requests → no hang | **observed**, 0.4 ms, `ECONNREFUSED`. A kill *during* a request needs a slow request, so it needs an enrolment; the mechanism is covered by the client's EOF and timeout tests |
 | Daemon's 2 s read timeout on a silent root peer | **observed** — `pid 28726 uid 0 sent nothing (EAGAIN); closing`, and the next request was answered normally. It cannot be unit-tested: the timeout is set after the `is_root` gate and tests run as uid 1000 |
-| **`sudo` authenticates by face** | **not done — needs enrolment (camera) and a separate approval to touch the sudo stack** |
+| **`sudo` authenticates by face** | **still not done, but no longer blocked.** Enrolment existed from 2026-08-23 (Phase 5) and a real face returned `Allow` through the daemon that same evening — so what is left is only the second half of this row: a separate approval to edit `/etc/pam.d/sudo`, which has its own recovery story |
 
-The last row is the phase exit and it stays open. What is left in it is not code.
+The last row is the phase exit and it stays open. What is left in it is not code, and as of
+Phase 5 it is not a missing capability either — it is a decision about the sudo stack.
 
 Every `PAM_AUTHINFO_UNAVAIL` above was matched against the module's own `debug` line in the
 journal, so each one is the failure it claims to be rather than a shared code: `No such
@@ -305,10 +306,10 @@ where that is right.
 **Exit:** template file copied to another machine is unusable. Kill the daemon
 mid-backoff, restart, backoff persists. Journal shows every attempt.
 
-**Status: met, with one leg of the second criterion still indirect.** The first is closed in
-CI; the second and third were observed on 2026-08-23 through `tools/ratelimit-try.sh`, 23
-checks, 23 passed. What is not observed is a failure the *daemon itself* recorded, because
-every verdict reachable without a camera is exempt from counting by design.
+**Status: met.** The first criterion is closed in CI; the second and third were observed on
+2026-08-23 through `tools/ratelimit-try.sh`, 23 checks, 23 passed. The one leg that was still
+indirect — a failure the *daemon itself* recorded — closed later the same day through Phase
+5's harness, once there was an enrolment to fail against.
 
 **The harness's first run reported 8 failures and every one of them was the harness.** Worth
 recording, because two were wrong beliefs about the daemon rather than typos:
@@ -339,21 +340,128 @@ now checks the daemon answers before it asserts anything about what it said.
 | The budget survives `kill -9` | **observed, with one leg still indirect.** The file outlives the kill and a restarted daemon refuses on it. That the write lands *before the reply* is shown by `Op::Clear` removing the entry from disk while the daemon is still running — the same `flush()` that `record_failure` calls — rather than by a failure the daemon recorded itself, which needs a camera |
 | The journal shows every attempt | **observed** — 5 `auth` lines for 5 requests, 2 `clear` lines for 3 clears, every one carrying uid, verdict, reason, peer, elapsed and `counted=`. Priorities separate: `<3>` lockout, `<6>` not-enrolled |
 | `serve::listen` recovers from a socket left behind by `kill -9` | **observed**, and unplanned — the harness needed to know when a restarted daemon was ready, and the stale inode is why the first version of it reported four false failures |
-| **A denied face moves the counter** | **not done, and not reachable without hardware.** Every verdict the harness can produce is exempt from counting by design, because reaching a counting one needs a face in front of a real camera. The harness prints this rather than leaving it implied |
+| **A denied face moves the counter** | **observed 2026-08-23**, by Phase 5's harness rather than this one — it needed an enrolment, which needed `faciolockctl`. Three bursts of a face that was not the enrolled one read `Deny, Deny, Deny`, `ratelimit.db` reached `1000 3 …`, and every one was logged `counted=1`. The exemption held at the same time: **nothing that never saw a face was counted** |
 
-The last row is the honest gap and it is the same gap Phase 3's exit has: the failure paths
-are demonstrable without a camera and the success path is not.
+That last row was the honest gap for three months of phases, and it was the same gap Phase 3's
+exit has — the failure paths are demonstrable without a camera and the success path is not.
+Phase 5 built the thing that closes it, which is why `tools/enrol-try.sh` and not
+`tools/ratelimit-try.sh` is where it finally got measured.
 
 ---
 
 ## Phase 5 — CLI & enrolment (week 6)
 
-- `faciolockctl enroll` — guided multi-capture, quality feedback, tier detection
-- `faciolockctl list` / `remove` / `test` / `diagnose` / `bench`
-- polkit policy for privileged operations
-- `bench` reports p50/p95/p99, not mean
+**Built 2026-08-23.** This is the phase that finally makes an enrolment possible, which is
+why Phases 3 and 4 have had the same row open at the bottom of both their tables.
+
+- ~~`faciolockctl enroll` — guided multi-capture, quality feedback, tier detection~~ —
+  **done**, three poses, one `Op::Enroll` per pose, accumulated in the daemon (P5-d)
+- ~~`faciolockctl list` / `remove` / `test` / `diagnose` / `bench`~~ — **done**
+- ~~polkit policy for privileged operations~~ — **done**, `data/polkit/org.faciolock.policy`
+- ~~`bench` reports p50/p95/p99, not mean~~ — **done**, nearest-rank, so every number printed
+  is a sample that was measured rather than one interpolated between two that were
+
+**And [Q4 is closed](08-open-questions.md#q4--ipc-raw-unix-socket-d-bus-or-both--decided-2026-08-23-raw-socket-only),
+against its own recommendation** (P5-a). Q4 had recommended the hybrid — raw socket for PAM,
+D-Bus for the CLI — since 2026-08-03, and Phase 5 is the phase that had to spend that rather
+than describe it. What the hybrid buys concretely is richer enrolment feedback; what it costs
+is `zbus` plus an async runtime inside the process that parses V4L2 buffers. The verdicts
+already on the wire turned out to carry the distinction a person acts on — `Deny` is "it
+looked and refused", `Unavailable` is "it could not judge" — which is "move closer" against
+"close the blinds" with no new protocol.
+
+### What the build settled that the plan did not anticipate
+
+**`Op::Enroll` needed no protocol change at all, and that is a decision rather than luck.**
+The obvious design is a response that says how many poses remain. `Response` is four fixed
+bytes parsed by a module loaded into `sudo`, `login` and `sddm`; enrolment is the least
+security-sensitive feature in the project and that parser is the most security-sensitive code
+in it. So the count lives in `faciolock_ipc::ENROL_POSES` and **both ends count** — the CLI
+prompts that many times, the daemon finalises on that number, and two constants that must
+agree are one constant.
+
+**`list` is the reason P4-d needed correcting.** P4-d said the CLI reaches the store "through
+the socket like everything else". A list of uids is a variable-length answer, so honouring
+that would have meant growing the same parser for the same bad reason. The CLI now reads the
+template *directory* and never its contents (P5-b): a filename is a uid, a mtime is a date,
+`remove` is an unlink, and reaching any of it already requires root. What P4-d actually
+protects — one consumer for the store code, one implementation of the format — is untouched.
+
+**`diagnose` can only assert a tier upward, and the reason is B18 rather than caution.**
+The first instinct is a probe that writes `ir-constant` when it sees no strobe. But "there is
+no strobe here" and "somebody is aiming an infrared floodlight at this" are the *same
+measurement* — and [B18](11-bug-log.md#b18) established that ordinary daylight produces it
+without an attacker. A helpful auto-demotion would hand back exactly the attack P1-e exists
+to prevent. So `diagnose` reports `ir-strobe` on a clean strobe and writes nothing otherwise;
+`ir-constant` needs a human to type it. `--write` also refuses to overwrite an existing
+config, so a diagnostic run in a bright room cannot rewrite a working machine (P5-e).
+
+**The daylight run produced a measurement worth keeping.** Run at 15:21 IST in the operator's
+room, `diagnose` read **alternation 1.00 at a bright/dark ratio of 3.5:1**, against wiki/10's
+nocturnal 14,000:1 and 100,000:1. The dark frames read ~21 where they read ~0.004 at night.
+That is B18 in one line — and it is also why the classifier gates on the *pattern* rather
+than the ratio: **the alternation survives ambient infrared intact and the ratio does not**.
+[13](13-daylight.md#the-strobe-pattern-survives-daylight-the-ratio-does-not) carries it.
+
+**`faciolockd --enroll` is deleted.** It existed to make `Op::Auth` testable before there was
+any way to enrol and its own comment said so. Keeping it would have meant two capture-and-
+store paths to hold in sync, one of which nobody runs.
+
+### Two defects caught in review before any of this was committed
+
+Both are the shape Phase 3's review found and both fail in the direction that matters — the
+tool reports success and the user discovers otherwise at a lock screen.
+
+- **The enrolment expiry was a total, and it had to be a gap.** `Pending` timed out 60 s
+  after the enrolment *began*. Two poses accepted, a minute of fumbling for glasses, and the
+  third arrives to an expired `Pending` — so the daemon starts over, answers `Ack` because
+  one pose is not three, the CLI counts its third `Ack` and prints "Enrolled", **and no
+  template was ever written.** Measured from the last pose instead, "abandoned" means what it
+  sounds like. `a_slow_enrolment_survives_as_long_as_poses_keep_arriving` fails against the
+  old field, which is how it was confirmed rather than assumed.
+- **`faciolockctl enroll` now asks the daemon instead of trusting its own count.** Three
+  `Ack`s mean three poses were captured; they do not mean a template exists — a store write
+  that failed on the last pose ends the same way. One `Op::Status` after the last pose costs
+  nothing, touches no camera, and turns a silent lie into a message naming both causes.
+
+And a third, which is a CLI bug rather than a daemon one: **`enroll` retried forever.** In
+daylight every pose answers `Unavailable`, so the loop printed advice and asked again with no
+exit but Ctrl-C — which would have killed `enrol-try.sh` through its trap and meant the
+carefully written B18 explanation in that harness could never print. A refused *pose* is
+still retried indefinitely, because the person is standing right there and moving is the fix;
+a capture the daemon **could not judge** now gives up after three, because neither a bright
+room nor a busy camera is fixed by pressing Enter again.
 
 **Exit:** a person who has not read this wiki can enrol and use it from the CLI alone.
+
+**Status: met 2026-08-23**, `sudo tools/enrol-try.sh`, **17 checks, 17 passed**, first run, no
+harness bugs — which is the first time that has happened and is worth saying because the
+Phase 4 harness needed three attempts to be right about its own preconditions.
+
+The run closed Phase 4's last row in the same pass, as expected: the two have been the same
+gap since 2026-08-09. A person enrolled from three prompts, authenticated, was denied three
+times by a face that was not theirs, and watched the counter reach 3 on disk.
+
+| Leg | State |
+|---|---|
+| 189 tests across the workspace, no camera attached | **observed**, `cargo test --workspace`, 0 failed |
+| The new crate did not leak into the PAM module's tree | **observed** — `cargo tree -p faciolock-pam` still reads exactly `libc` + `faciolock-ipc`, and its CI assertion still passes. This is the rule wiki/04 says a distro reviewer checks first, and a fourth binary in the workspace is exactly the kind of change that breaks it quietly |
+| `diagnose` finds the IR camera on real hardware | **observed** — names `/dev/video2`, rejects the RGB node for not offering greyscale and both UVC metadata nodes for not being capture devices. wiki/10 Probe 4's disambiguation, reproduced from our own code rather than from `v4l2-ctl` |
+| `diagnose` reads the strobe | **observed twice, at both ends of the ambient range.** Alternation **1.00 in both**; ratio 3.5:1 in daylight and **89,857:1** after dark, on the same machine the same evening. The pair is the evidence for the claim above, not just an illustration of it |
+| `diagnose --write` never overwrites | **observed**, unit test, on the raw file contents after a second call |
+| An unknown `tier` stops the daemon rather than defaulting | **observed** — `tier = "rgb-ish"` refuses before the socket is bound |
+| The daemon starts, binds and warms with the new config | **observed** — 6 frames in 339 ms, unchanged since Phase 2 |
+| A pose only joins an enrolment it belongs to | **observed**, unit test, both ways of getting it wrong — another user's uid, and an expired session |
+| No enrolment failure can read as a success | **observed**, unit test: every refusal maps to `Deny` or `Unavailable`, and specifically never to `Ack`, which is what the CLI counts as a captured pose |
+| **A person enrols and authenticates from the CLI alone** | **observed 2026-08-23.** Three prompted poses, template written (4,676 bytes, `FLT2`, exactly three captures logged), `list` showed it, and the operator's own face returned `Allow` — the **first `Allow` this project has ever produced**, logged at `<5>` and counted |
+| **A denied face moves the counter** (Phase 4's last row) | **observed 2026-08-23**, and it closes a row open since Phase 3. Three bursts of a face that was not the enrolled one: `Deny`, `Deny`, `Deny`, `ratelimit.db` reading `1000 3 …`, all three logged `counted=1` — and **nothing that never saw a face was counted**, so P2-g's exemption held while the budget moved |
+| Enrolment removes cleanly | **observed** — `remove` unlinked the template *and* cleared the budget through `Op::Clear`, and `Status` went back to `NoEnrolment` |
+| `bench` | **not observed.** The one subcommand the harness does not exercise. It is also the one that wants a **release** daemon: an enrolment pose cost 6.6–6.7 s in this debug build against wiki/06's 85 ms for SFace, so any number `bench` prints from `target/debug` is a measurement of `tract` compiled without optimisation and nothing else |
+
+**Not in this phase, and it needs its own decision:** Phase 3's exit — `sudo` authenticates
+by face — becomes *reachable* the moment an enrolment exists. It stays open. Editing
+`/etc/pam.d/sudo` is a change with its own recovery story and the roadmap has always said it
+takes a separate approval.
 
 ---
 

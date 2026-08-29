@@ -3,7 +3,7 @@
 IR face authentication for Linux via PAM. Rust. Built to look and behave like a
 platform component, not an add-on.
 
-**Status: Phases 1, 3 and 4 built; Phase 2 open on one criterion.**
+**Status: Phases 1, 3, 4 and 5 built; Phase 2 open on one criterion.**
 
 **Phase 4 landed 2026-08-23** — the template store is no longer plaintext and no longer
 keyed by a name. `<uid>.tpl` is XChaCha20-Poly1305 with the uid authenticated as associated
@@ -135,6 +135,51 @@ timeouts after `connect`, which does not return promptly when a listener's backl
 and the daemon had no read timeout at all on an accepted connection. [B23](11-bug-log.md#b23)
 also fell out of it — the socket's 0600 was being bought with a *process-global* `umask`.
 
+**Phase 5 is built, and it is the one that unblocks the others.** Phases 3 and 4 both end
+with the same open row, for the same reason: there has never been an enrolment on this
+machine, so `sudo`-by-face and "a denied face moves the counter" have both been unreachable.
+`faciolockctl` is that missing piece — `enroll` (three poses, one request each, accumulated
+in the daemon), `list`, `remove`, `test`, `bench`, `diagnose`.
+
+**[Q4 is closed, against its own recommendation](08-open-questions.md#q4--ipc-raw-unix-socket-d-bus-or-both--decided-2026-08-23-raw-socket-only)**
+(P5-a): one IPC surface, the CLI speaks the same raw socket as PAM, polkit gates it at
+`pkexec`. The hybrid had been recommended since day one and what it buys, weighed at the
+moment of spending rather than in the abstract, is richer enrolment feedback — for `zbus` and
+an async runtime inside the process that parses V4L2 buffers. The verdicts already on the
+wire separate "it looked and refused" from "it could not judge", which is the distinction a
+person acts on. `faciolockctl` came out at **779 KB stripped** against a ~2 MB budget, and
+`cargo tree -p faciolock-pam` still reads exactly `libc` + `faciolock-ipc`.
+
+`Op::Enroll` needed **no protocol change**: `Response` is four fixed bytes parsed inside a
+root PAM process, and the obvious "poses remaining" field would have grown that parser for
+the least security-sensitive feature in the project. The count is a shared constant instead,
+and both ends count.
+
+And `diagnose` produced a measurement worth keeping. In daylight it read **alternation 1.00
+at a bright/dark ratio of 3.5:1**, against wiki/10's nocturnal 14,000:1 — the emitter is not
+what changed, the floor is, and it is 5,000× higher. That is [B18](11-bug-log.md#b18) seen
+through a second statistic, and it is why the tier classifier gates on the *pattern*:
+**the alternation survives ambient infrared intact and the ratio does not**
+([13](13-daylight.md#the-strobe-pattern-survives-daylight-the-ratio-does-not)). A classifier
+keyed on the ratio would have called a perfectly strobing machine `ir-constant` because
+somebody opened the blinds, which is the demotion P1-e exists to prevent.
+
+**`sudo ./tools/enrol-try.sh` — 17 checks, 17 passed, first run, 2026-08-23.** A person
+enrolled from three prompts, and **the project produced its first `Allow`**: a real face,
+through the real daemon, over the real socket. Then three bursts of a face that was not the
+enrolled one read `Deny, Deny, Deny` and took `ratelimit.db` to 3 — which closes **Phase 4's
+last row**, open since 2026-08-09, and it needed Phase 5 to exist because it needed an
+enrolment. Phase 3's `sudo`-by-face row is now unblocked rather than closed: what is left in
+it is a decision about editing `/etc/pam.d/sudo`, not a missing capability.
+
+The same run read the strobe after dark at **89,857:1**, against 3.5:1 from the same command
+in daylight nine hours earlier — with **alternation 1.00 in both**. That pair, not either
+number, is the evidence for gating the tier on the pattern.
+
+**Still unobserved:** `bench`. It is also the one thing that wants a release daemon — an
+enrolment pose cost 6.6 s in the debug build against wiki/06's 85 ms for SFace, so a debug
+`bench` measures unoptimised `tract` and nothing else.
+
 ## Index
 
 | Page | What's in it |
@@ -163,8 +208,10 @@ Debian — EdgeFace was ruled out when its *weights* turned out to be non-commer
 ([B10](11-bug-log.md#b10)). Liveness is arithmetic, not a neural net: the IR
 camera already alternates emitter-lit and dark frames, so differencing them rejects
 screens, prints, and IR-floodlight attacks for the cost of a few `f32` reductions and
-no writes to the device. Enrolled templates are sealed to the TPM. Target: p95 unlock
-under 400 ms wall-clock, zero RSS when idle.
+no writes to the device. Enrolled templates are encrypted with a root-only key file — the
+TPM was deferred with the seam built (P4-a), and [03 R6](03-pam-and-security.md#r6--templates-are-encrypted-the-key-is-a-file-not-the-tpm-v1)
+says plainly which attacks that stops and which it does not. Target: p95 unlock under 400 ms
+wall-clock, zero RSS when idle.
 
 ## Decisions so far
 
@@ -194,13 +241,18 @@ under 400 ms wall-clock, zero RSS when idle.
 | P4-a | **The template key is a root-only file, not the TPM.** The store is encrypted either way; what was decided is where the key lives. `store::KeyProvider` puts the choice on disk *and* in the AEAD's associated data, so adding `Tpm = 1` later is a value old code refuses rather than a format break. The packaging objection that shaped Q5 turned out not to bind — `librust-tss-esapi-dev` is in the archive — but a C library in the process that parses attacker pixels still is a cost | 2026-08-23 |
 | P4-b | **The lockout is released by `pam_sm_acct_mgmt`, not `pam_sm_setcred`.** Both are "the stack succeeded" signals; `setcred` is not called reliably by screen lockers, and the lock screen is exactly where a locked-out user is standing. The module returns `PAM_IGNORE` on every path, because an account-stack failure refuses a login outright instead of falling through to a password | 2026-08-23 |
 | P4-c | **Backoff and lockout numbers are hardcoded, never config.** Same rule the vision thresholds already follow: a threshold reachable from an editable file is a threshold an attacker with one write sets to zero, and this one is read by the process that grants access | 2026-08-23 |
-| P4-d | **`faciolock-store` is not built.** wiki/04 planned it; the store has one consumer, and Phase 5's CLI reaches it over the socket like everything else. A crate boundary with one consumer costs maintenance and buys nothing | 2026-08-23 |
+| P4-d | **`faciolock-store` is not built.** wiki/04 planned it; the store has one consumer. A crate boundary with one consumer costs maintenance and buys nothing. (The clause about the CLI reaching it over the socket was corrected by P5-b) | 2026-08-23 |
 | P4-e | **Keyed by uid, translated once.** `users.rs` is the only place a username becomes a number; the store, the failure budget and the audit log never see a name. A name that does not resolve answers `NoEnrolment` — the same answer an unenrolled real user gets, so the socket cannot enumerate accounts | 2026-08-23 |
 | P2-h | **No RGB camera in v1.** Measured: it cannot see the emitter (SNR 0.85 vs the IR camera's 1,500–15,000), so it cannot do strobe liveness. AND-ing it in would rely on a branch that reads *true* for attackers in daylight; OR-ing it in lets a photo unlock. Deferred to v2 as an explicit opt-in tier | 2026-08-06 |
+| P5-a | **One IPC surface: the CLI speaks the same raw socket as PAM, as root, polkit-gated at `pkexec`.** Closes Q4 against its own recommendation. The hybrid bought richer enrolment feedback and cost `zbus` plus an async runtime inside the process that parses V4L2 buffers; the existing verdicts already separate "it looked and refused" from "it could not judge", which is the distinction a person acts on | 2026-08-23 |
+| P5-b | **`faciolockctl` reads the template *directory* and never its contents.** A `list` answer is variable-length and `Response` is four fixed bytes parsed inside a root PAM process. A filename is a uid, a mtime is a date, `remove` is an unlink — and reaching any of it already requires root. Corrects the second clause of P4-d; the store still has one consumer and one implementation | 2026-08-23 |
+| P5-c | **`test` and `bench` spend the real failure budget and give it back.** They go through `Op::Auth` exactly as PAM does, then send `Op::Clear` — something the CLI can already do as root. The alternative was a no-count path inside the daemon, and after [B24](11-bug-log.md#b24) the budget is the defence rather than a backstop behind liveness, so a bypass in it is not a thing to add for a benchmark | 2026-08-23 |
+| P5-d | **Enrolment is three poses, accumulated in the daemon, with a 60 s expiry.** One `Op::Enroll` per pose and no protocol change: `ENROL_POSES` is a shared constant because both ends count. The daemon accumulates rather than the CLI because a CLI that gathered embeddings and handed them back would make the store write a function of the peer's bytes | 2026-08-23 |
+| P5-e | **`diagnose` only ever asserts a tier upward.** It writes `ir-strobe` on a clean strobe and writes nothing otherwise. "No strobe here" and "somebody is pointing a floodlight at this" are the same measurement, and [B18](11-bug-log.md#b18) showed daylight alone produces it — so an automatic demotion would hand back the attack P1-e exists to prevent | 2026-08-23 |
 
-Still open: Q4 (IPC), Q9 (name), and whether the real recordings are ever
-published (deferred to ITP — publishing is irreversible, so it is not decided early).
-Q5 closed 2026-08-23 (P4-a) and names what would re-open it.
+Still open: Q9 (name), and whether the real recordings are ever published (deferred to ITP —
+publishing is irreversible, so it is not decided early). Q5 closed 2026-08-23 (P4-a) and
+names what would re-open it; Q4 closed 2026-08-23 (P5-a) and names what would re-open it.
 
 ## Reference hardware
 

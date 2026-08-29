@@ -279,15 +279,56 @@ reuse) with our own ioctl code. Probably the answer, but it needs checking.
 
 ---
 
-## Q4 — IPC: raw Unix socket, D-Bus, or both?
+## Q4 — IPC: raw Unix socket, D-Bus, or both? — **DECIDED (2026-08-23): raw socket only**
 
 Raw socket keeps the root-process dependency tree at `libc` — the strongest security
 property in the design, and the one a distro reviewer checks first. D-Bus gives free
 KDE/polkit/settings integration, which is most of "feels built-in".
 
 The hybrid (raw socket for the PAM hot path, D-Bus for CLI and settings UI) gets
-both, at the cost of two IPC surfaces in the daemon. Recommend the hybrid unless
-there's a reason not to.
+both, at the cost of two IPC surfaces in the daemon. ~~Recommend the hybrid unless
+there's a reason not to.~~
+
+**Decision: one IPC surface. `faciolockctl` speaks the same socket the PAM module does, as
+root, gated by polkit at the `pkexec` boundary rather than per D-Bus method.** Recorded as
+P5-a, and taken against this section's own recommendation, so the reason had better be
+written down.
+
+The hybrid's case was integration, and Phase 5 is the phase that finally had to spend it
+rather than describe it. What it buys concretely is **richer enrolment feedback** — a D-Bus
+method can return a struct, so the CLI could say *"no face in the upper third of the frame"*
+where the raw socket says `Deny`. What it costs is `zbus` plus an async runtime inside the
+process that parses V4L2 buffers and holds the template key, and a second surface to secure,
+fuzz and review. Weighed at the moment of use rather than in the abstract, the feedback is
+worth about one sentence of terminal output and the cost is a dependency tree a distro
+reviewer reads.
+
+The coarse feedback turned out to be less coarse than expected, which is what settled it. The
+existing verdicts already carry the distinction that matters to a person at a terminal:
+`Deny` is *"it looked and refused"* and `Unavailable` is *"it could not judge"* — so
+"move closer" and "close the blinds" are separable answers without a byte of new protocol.
+The detail beyond that is in the journal, where wiki/03 R9 already puts it.
+
+**What this defers rather than decides.** A KDE settings module (wiki/07, beyond v1) is a
+QML/Kirigami deliverable that talks D-Bus natively, and it would need a bridge. That is a
+real cost and it lands on whoever builds the KCM. It does not land on v1, and a KCM that
+shells out to `faciolockctl` through `pkexec` is a legitimate first version of it.
+
+**What would re-open this:** a settings UI actually being built, or a second consumer of the
+daemon that cannot reasonably run as root. Neither exists.
+
+### The knock-on: `list` and `remove` do not use the socket at all
+
+`faciolock_ipc::Response` is four fixed bytes and it is parsed by a PAM module inside a root
+process. A `list` answer is variable-length, so carrying it would mean growing that parser —
+putting the least security-sensitive feature in the project through the most
+security-sensitive code in it, to save a `read_dir`.
+
+So the CLI **reads the template directory and never its contents** (P5-b): a filename is a
+uid, a mtime is a date, `remove` is an unlink, and nothing links `store.rs` or touches the
+key. wiki/04's P4-d said the CLI reaches the store "through the socket like everything else";
+the part of P4-d that was load-bearing — no `faciolock-store` crate, one consumer for the
+store code — is untouched.
 
 ---
 

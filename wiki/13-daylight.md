@@ -78,6 +78,50 @@ attack as *more* live-looking than a live face. This is the finding that stands:
 magnitude statistic detects IR injection at high ambient.** Falloff cannot cover for it —
 falloff reads geometry and cannot see injected IR.
 
+### The strobe *pattern* survives daylight; the *ratio* does not
+
+Measured 2026-08-23 at 15:21 IST in the operator's room, by `faciolockctl diagnose` — 30
+frames, whole-frame mean luma, the same statistic wiki/10 Probe 3 recorded at night:
+
+```text
+daylight, 15:21   69.660  18.855  77.518  21.064  77.433  21.263  77.518  21.429  …
+after dark, 22:0x 53.922   0.000  57.930   0.001  57.528   0.001  57.220   0.001  …
+```
+
+Both readings are the same command on the same machine the same evening, which is what makes
+the pair worth more than either number alone:
+
+| | wiki/10 Probe 3 (night) | daylight, 15:21 | after dark, same day |
+|---|---|---|---|
+| OFF floor | ~0.004 | **~21** | 0.000–0.001 |
+| ON level | ~54–62 | ~77 | ~54–58 |
+| ratio | 14,000:1 (100,000:1 on 3b) | **3.5:1** | **89,857:1** |
+| alternation | perfect from frame 5 | **1.00** | **1.00** |
+
+**The emitter is not what changed. The floor is.** Ambient infrared lifts the dark frames by
+four orders of magnitude and the ratio collapses with them — which is [B18], seen from a new
+angle and confirmed by a second statistic. The ON level barely moves (77 against 54–58) and
+the OFF floor moves by everything. But the *alternation is untouched*: **1.00 in both runs**,
+not one missed beat, across a 25,000× swing in the ratio.
+
+That difference is load-bearing rather than decorative. `dark_ratio_max` is a magnitude
+statistic and it is the check daylight kills. The **phase** is not a magnitude, and nothing
+measured so far suggests ambient light disturbs it: ambient adds a constant to both halves,
+which moves a ratio and leaves a pattern where it was.
+
+Two consequences, one taken and one not:
+
+- **Taken.** `faciolockctl diagnose` gates its tier verdict on the alternation and treats the
+  ratio only as a sanity floor (P5-e). A classifier keyed on the ratio would have answered
+  "no strobe, this must be an `ir-constant` machine" in this room, in daylight, with the
+  emitter strobing perfectly — and writing that tier is the demotion P1-e exists to prevent.
+- **Not taken, and it is not a liveness check yet.** An "is it alternating" check is not a
+  replacement for `dark_ratio_max`, because an attacker who can inject IR can inject it
+  *strobed*. Section 2 above is the reason: the gate must not key on a quantity the attacker
+  sets, and phase is such a quantity once they know the period. What this measurement
+  establishes is narrower and worth writing down anyway — **there is a strobe statistic that
+  daylight alone does not destroy**, which is more than was true this morning.
+
 ---
 
 ## Candidate unlocks, cheapest first

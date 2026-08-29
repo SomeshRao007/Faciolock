@@ -186,7 +186,7 @@ first unlock: model load 377 ms + camera warm + the authentication itself.
 |---|---|
 | `pam_faciolock.so` | **353 KB measured** (was estimated ~300 KB) |
 | `faciolockd` | ~25 MB (Rust + `tract` kernels, stripped; measured on the spike binary) |
-| `faciolockctl` | ~2 MB |
+| `faciolockctl` | ~~~2 MB~~ **779 KB measured** (release, stripped, 2026-08-23). Under budget because P5-a kept it off D-Bus: its whole tree is `faciolock-ipc`, `faciolock-camera`, `libc`, `serde` and `toml`. `zbus` and an async runtime would have been most of the estimate |
 | YuNet | 85 KB |
 | Embedder (SFace) | 37 MB |
 | **Total** | **~62 MB (SFace + tract, zero native deps)** |
