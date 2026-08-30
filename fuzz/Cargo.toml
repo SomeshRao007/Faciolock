@@ -1,0 +1,42 @@
+# Deliberately NOT a workspace member -- see the `exclude` in the root Cargo.toml and the
+# same reasoning that keeps `spikes/` out.
+#
+# `faciolock-pam` asserts in a test that its dependency tree is exactly `libc` +
+# `faciolock-ipc`, because that is the first thing a distro security reviewer checks about a
+# module loaded into `sudo`. `libfuzzer-sys` pulls in `arbitrary`, `cc` and a bundled clang
+# runtime; a fuzz crate inside the workspace would put all of that in the lockfile that
+# assertion rests on. The fuzzer must not be able to weaken the thing it is fuzzing.
+[package]
+name = "faciolock-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+faciolock-ipc = { path = "../crates/faciolock-ipc" }
+faciolock-vision = { path = "../crates/faciolock-vision" }
+
+[[bin]]
+name = "ipc_request"
+path = "fuzz_targets/ipc_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc_response"
+path = "fuzz_targets/ipc_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "burst"
+path = "fuzz_targets/burst.rs"
+test = false
+doc = false
+bench = false
