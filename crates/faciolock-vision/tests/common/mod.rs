@@ -1,24 +1,8 @@
-//! Locating the corpus and the models, and being loud when they are missing.
-//!
-//! The real Phase 0 recordings are the operator's face and are gitignored; the ONNX
-//! models are large binaries fetched from upstream and are gitignored too. So a test
-//! that needs either of them can be run in an environment that has neither.
-//!
-//! **A test that silently passes when its input is absent is worse than no test at all.**
-//! That is [B3](../../../../wiki/11-bug-log.md) exactly — a redirect turned a missing
-//! binary into "no evidence", and "no evidence" reads like "nothing wrong". Every skip
-//! here prints a banner naming what was missing, and setting `FACIOLOCK_CORPUS_REQUIRED=1`
-//! turns a skip into a failure, which is how CI will run once corpus provisioning is
-//! settled.
-
-// Each integration-test binary compiles this module separately and uses a different
-// subset of it, so anything one binary does not call reads as dead there.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 
 pub fn repo_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR is crates/faciolock-vision.
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
@@ -42,8 +26,6 @@ fn required() -> bool {
     std::env::var("FACIOLOCK_CORPUS_REQUIRED").is_ok_and(|v| v == "1")
 }
 
-/// Announce that a test could not run, and fail instead if this environment demands the
-/// inputs be present.
 pub fn skip(what: &str, path: &Path) -> bool {
     let msg = format!(
         "\n  ####  SKIPPED — DEGRADED RUN  ####\n  \
@@ -58,10 +40,7 @@ pub fn skip(what: &str, path: &Path) -> bool {
     false
 }
 
-/// A `.gray` capture plus the geometry from its sidecar.
 pub struct Capture {
-    /// Filename stem, e.g. `live_lit_frontal_20260803T183134Z`. **Unique**; `label` is
-    /// not — two takes of the same scene share a label and differ only by timestamp.
     pub stem: String,
     pub label: String,
     pub bytes: Vec<u8>,
@@ -80,12 +59,6 @@ impl Capture {
     }
 }
 
-/// Every recording in the corpus that has both a sidecar and its pixels.
-///
-/// Driven by the sidecars, which *are* committed. A sidecar with no `.gray` beside it is
-/// reported rather than ignored — [B4](../../../../wiki/11-bug-log.md) is the converse
-/// case, a capture with no sidecar, and both directions leave the corpus lying about what
-/// it contains.
 pub fn captures() -> Vec<Capture> {
     let dir = corpus_dir();
     let mut out = Vec::new();
@@ -119,8 +92,6 @@ pub fn captures() -> Vec<Capture> {
     out
 }
 
-/// Enough JSON to read a flat sidecar. Not a parser, and not pretending to be one — the
-/// sidecars are written by `tools/record.sh` and have three levels of nothing.
 fn json_usize(s: &str, key: &str) -> Option<usize> {
     let at = s.find(&format!("\"{key}\""))?;
     let rest = &s[at + key.len() + 2..];

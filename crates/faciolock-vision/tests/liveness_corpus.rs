@@ -1,20 +1,3 @@
-//! Liveness replayed over the recorded corpus, with real face boxes.
-//!
-//! **This test is the closure of [B7](../../../../wiki/11-bug-log.md).** The Phase 0 probe
-//! used a centred 50% crop as a stand-in for a face box, and the cell maps showed the
-//! subject sitting at the edge of that ROI rather than in the middle of it: `falloffCV`
-//! was measuring a subject-versus-background gradient, not facial curvature, and two
-//! recordings of the same pose gave 0.31 and 0.64 purely from where the operator sat.
-//! Now the ROI is YuNet's box, so the measurement tracks the face.
-//!
-//! What this can settle: the live-face falloff distribution, which is what the
-//! degenerate-flatness floor is set below. What it still cannot settle: whether that
-//! distribution *separates* from a printed photo, because there is no printed photo in the
-//! corpus. wiki/09 calls that the project's one genuinely unproven claim and it stays
-//! unproven until a `spoof_print_*` recording exists.
-//!
-//! Run with `-- --nocapture` for the numbers.
-
 mod common;
 
 use faciolock_vision::config::DetectConfig;
@@ -142,11 +125,6 @@ fn corpus_liveness_report() {
     }
 }
 
-/// The verified claim, replayed: an IR floodlight is rejected and no honest capture is.
-///
-/// The threshold behind this is the only one in the project measured against a real
-/// attack — `max(OFF/ON) > 1e-3`, sitting ~65x above the worst live reading and ~130x
-/// below the attack, with zero false rejects across 210 live pairs (wiki/11 B9).
 #[test]
 fn the_floodlight_attack_is_rejected_and_live_captures_are_not() {
     let replays = replay_corpus();
@@ -157,13 +135,6 @@ fn the_floodlight_attack_is_rejected_and_live_captures_are_not() {
 
     for r in &replays {
         let Some(rep) = &r.report else {
-            // A capture that could not become a burst is a rejection. For the attack class
-            // that is a correct outcome outright.
-            //
-            // For a *live* capture it is correct only when the ambient gate fired: the
-            // room was too bright in near-infrared for this hardware to measure liveness
-            // at all, so refusing is the honest answer and PAM falls through to the
-            // password prompt (B18). Any other reason is a genuine false reject.
             if r.label.starts_with("live_") {
                 let why = r.burst_error.as_deref().unwrap_or("(none)");
                 assert!(
@@ -179,10 +150,6 @@ fn the_floodlight_attack_is_rejected_and_live_captures_are_not() {
         };
 
         if r.label.starts_with("live_") {
-            // Any live capture that got *past* the ambient gate is one this hardware can
-            // measure, so it must pass cleanly. There is no longer a tolerated-failure
-            // branch here: B18's daylight false-reject is handled above, by refusing to
-            // measure rather than by measuring wrongly.
             assert!(
                 rep.rejection().is_none(),
                 "{}: honest capture inside the measurable ambient range was rejected by {:?}",
@@ -202,10 +169,6 @@ fn the_floodlight_attack_is_rejected_and_live_captures_are_not() {
     assert!(checked > 0, "no captures were available to check");
 }
 
-/// The number the flatness floor is set from.
-///
-/// Reports, and asserts only that a floor below the observed minimum would cost nothing.
-/// It deliberately does **not** assert that live and print separate — there is no print.
 #[test]
 fn live_falloff_distribution_bounds_the_flatness_floor() {
     let replays = replay_corpus();
@@ -235,17 +198,6 @@ fn live_falloff_distribution_bounds_the_flatness_floor() {
     }
 }
 
-/// Class separation: what the corpus can and cannot currently threshold on.
-///
-/// Groups every capture by its `<class>_` prefix and prints the range each liveness metric
-/// spans within that class. **This is the test to read after recording a spoof.** The
-/// moment a `spoof_phone` or `spoof_print_*` capture exists, the gap between the `live`
-/// row and the `spoof` row for a given metric *is* the separation that metric provides —
-/// and if there is no gap, that check does not work and no threshold will rescue it.
-///
-/// Reports only. It asserts nothing about spoofs because, until one is recorded, there is
-/// nothing to assert; and once one is, the threshold it implies is a decision to take
-/// deliberately rather than a number for a test to invent.
 #[test]
 fn class_separation_report() {
     let replays = replay_corpus();

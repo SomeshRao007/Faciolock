@@ -1,0 +1,88 @@
+# The process that touches attacker-controlled pixels (wiki/03 R7).
+#
+# Everything below the [Service] header past ExecStart is there to make that sentence
+# survivable. Target is `systemd-analyze security faciolock.service` <= 2.0; the measured
+# score and what each refusal costs are in wiki/03 R7.
+#
+# Three settings are deliberately NOT here, and each one would score better than it deserves:
+#
+#   PrivateDevices=yes   gives the service a private /dev with no video nodes in it. The
+#                        daemon's entire job is one video node. DevicePolicy=closed plus a
+#                        single DeviceAllow is the same guarantee with the hole we need.
+#   PrivateUsers=yes     maps every group but the service's own to nobody, which takes
+#                        `video` with it — and `video` is how the daemon opens the camera at
+#                        all. It would score well and not run.
+#   ProtectSystem=full   is weaker than strict, and strict works here because everything the
+#                        daemon writes lives under StateDirectory.
+
+[Unit]
+Description=Faciolock face authentication daemon
+Documentation=file:///usr/share/doc/faciolock/04-architecture.md
+Requires=faciolock.socket
+After=faciolock.socket
+
+[Service]
+ExecStart=/usr/libexec/faciolock/faciolockd
+# Socket-activated and idle-exiting: a clean exit is the normal end of a run, not a failure,
+# and the next connect() starts it again. Restart=on-failure would fight the idle timer.
+Restart=no
+
+# --- identity -------------------------------------------------------------------------
+# Nothing in this process is root. wiki/04's privilege split is that the PAM module holds a
+# socket and this holds the camera, the models and the store.
+User=faciolock
+Group=faciolock
+# /dev/video2 is root:video 0660. This is the one privilege the daemon has that a plain
+# unprivileged process does not.
+SupplementaryGroups=video
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+
+# --- filesystem -----------------------------------------------------------------------
+# /var/lib/faciolock, created 0700 and owned by this user on first start. It holds the
+# encrypted templates, their key and the failure budget (wiki/04 data layout).
+StateDirectory=faciolock
+StateDirectoryMode=0700
+UMask=0077
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# --- devices --------------------------------------------------------------------------
+# Everything closed, then the one class of node this daemon exists to read. `char-video4linux`
+# rather than a /dev/video* glob: the glob is a path and the numbering renumbers across boots
+# (wiki/10 Probe 4), while the device class does not.
+DevicePolicy=closed
+DeviceAllow=char-video4linux rw
+
+# --- network --------------------------------------------------------------------------
+# There is no network in this design and there never will be: a biometric daemon that can
+# reach the network is a biometric daemon that can exfiltrate a template. AF_UNIX is the
+# socket PAM connects on and the only family the process needs to name.
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+
+# --- kernel ---------------------------------------------------------------------------
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# `tract` is a pure-Rust interpreter with no JIT and the models are mmap'd read-only, so this
+# costs nothing here. It would have been a live question under `ort` — wiki/03 R7 flagged it
+# as an input to Q2, and choosing tract settled it.
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources @privileged
+SystemCallErrorNumber=EPERM
