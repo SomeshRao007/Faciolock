@@ -1,0 +1,13 @@
+Name: Face authentication (Faciolock)
+Default: no
+Priority: 512
+Auth-Type: Primary
+Auth:
+	[success=end default=ignore]	pam_faciolock.so
+Auth-Initial:
+	[success=end default=ignore]	pam_faciolock.so
+Account-Type: Additional
+Account:
+	optional	pam_faciolock.so
+Account-Initial:
+	optional	pam_faciolock.so

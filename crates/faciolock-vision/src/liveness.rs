@@ -1,47 +1,13 @@
-//! Liveness: arithmetic, not a neural network.
-//!
-//! **A liveness verdict is a property of the burst, not of a frame.** Every check here
-//! aggregates *conjunctively* — one contaminated pair sinks the whole burst — and that is
-//! not a stylistic choice. A pulsed IR source idles between packets, so 7 of 42 pairs of a
-//! real floodlight attack read as perfectly clean. Under a per-pair rule that is a
-//! 1-in-36 bypass at the two-pair capture budget; under conjunction it rejects with four
-//! orders of magnitude to spare ([B9](../../../wiki/11-bug-log.md)).
-//!
-//! Matching, in `embed`, aggregates k-of-n instead — because there the risk runs the other
-//! way and a single bad frame is a blink. **The two rules are opposites and any refactor
-//! that unifies them reintroduces B9.**
-//!
-//! The checks split into two groups by whether they need a face box, which is what lets
-//! the pipeline reject a screen or a floodlight for a few `f32` reductions without paying
-//! for detection at all.
-
 use crate::config::{Config, Enforcement, Threshold};
 use crate::frame::{Burst, Pair, PixelRect, Rect};
 
-/// Cells per side of the falloff grid.
-///
-/// 6x6 gives 36 samples of the face box: enough for the shape of the falloff to show up,
-/// coarse enough that each cell still averages over hundreds of pixels rather than sensor
-/// noise. On a typical 134x181 detected face that is ~660 px per cell.
 pub const GRID: usize = 6;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Check {
-    /// The OFF frame must be dark *relative to the ON frame of the same pair*.
-    ///
-    /// Never an absolute floor: the OFF floor measured 0.004 in one session and 0.0005 in
-    /// another on the same machine, from ambient light alone. A fixed floor calibrated in
-    /// a dark room rejects every honest attempt in daylight; one calibrated in daylight
-    /// accepts a floodlight attack at night.
     DarkFrame,
-    /// The emitter must actually be lighting whatever is in front of it. An LCD or OLED
-    /// emits essentially nothing in NIR, so a phone or laptop replay collapses this to ~0.
     Response,
-    /// The response must vary across the face. A live face is a curved, subsurface-
-    /// scattering reflector — nose and brow brighten far more than cheeks and jaw. A flat
-    /// print reflects near-uniformly.
     Falloff,
-    /// Consecutive OFF frames should be near-identical over ~100 ms.
     Motion,
 }
 
@@ -56,25 +22,18 @@ impl Check {
     }
 }
 
-/// Which direction of comparison fails a check.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Fails {
-    /// Reject when the measured value is above the threshold.
     Above,
-    /// Reject when the measured value is below the threshold.
     Below,
 }
 
-/// One check's outcome over a whole burst.
 #[derive(Clone, Copy, Debug)]
 pub struct CheckResult {
     pub check: Check,
-    /// The worst value any single pair produced — the one conjunction turns on.
     pub worst: f64,
     pub threshold: f64,
     pub enforcement: Enforcement,
-    /// How many pairs failed. Non-zero on a passing burst is possible only for an
-    /// advisory check, and is worth logging when it happens.
     pub failing_pairs: usize,
 }
 
@@ -82,13 +41,11 @@ impl CheckResult {
     pub fn passed(&self) -> bool {
         self.failing_pairs == 0
     }
-    /// True only when this check both failed and is trusted enough to say so.
     pub fn rejects(&self) -> bool {
         !self.passed() && self.enforcement == Enforcement::Enforced
     }
 }
 
-/// Everything measured about a burst, and whether any of it is grounds for refusal.
 #[derive(Clone, Debug, Default)]
 pub struct LivenessReport {
     pub results: Vec<CheckResult>,
@@ -96,15 +53,10 @@ pub struct LivenessReport {
 }
 
 impl LivenessReport {
-    /// The first enforced failure, if any. `None` means nothing *provable* is wrong —
-    /// which is not the same as "this is definitely a live face", and the distinction is
-    /// why `results` is carried out of here rather than reduced to a bool.
     pub fn rejection(&self) -> Option<CheckResult> {
         self.results.iter().copied().find(CheckResult::rejects)
     }
 
-    /// Checks that failed but were not trusted enough to reject on. These are the ones
-    /// waiting on a spoof recording to calibrate against.
     pub fn advisory_failures(&self) -> impl Iterator<Item = &CheckResult> {
         self.results.iter().filter(|r| !r.passed() && r.enforcement == Enforcement::Advisory)
     }
@@ -113,7 +65,6 @@ impl LivenessReport {
         self.results.iter().copied().find(|r| r.check == check)
     }
 
-    /// Combine the pre-box and post-box halves into one report.
     pub fn merge(mut self, other: LivenessReport) -> LivenessReport {
         self.results.extend(other.results);
         self.pairs = self.pairs.max(other.pairs);
@@ -121,13 +72,6 @@ impl LivenessReport {
     }
 }
 
-/// Fold one check across every pair of a burst, conjunctively.
-///
-/// The empty case returns `None` rather than a pass. Conjunction over zero pairs is
-/// vacuously true, and a burst that produced no pairs would sail through every check that
-/// was supposed to inspect it — an attacker who can suppress pairing would face no
-/// liveness at all. `Burst` refuses to exist below `min_pairs` for the same reason; this
-/// is the second lock on the same door.
 fn conjunctive<F>(
     check: Check,
     t: Threshold,
@@ -164,8 +108,6 @@ where
         };
     }
 
-    // A check that could not be measured on any pair has not passed. Reporting it as a
-    // pass is how "no evidence" becomes "evidence of absence" — see B3.
     if measured == 0 {
         return None;
     }
@@ -179,10 +121,6 @@ where
     })
 }
 
-/// The checks that need no face box, run before detection as an early-out.
-///
-/// Cheap: a handful of `f32` reductions against YuNet's ~11 ms. Detection is only reached
-/// by something already behaving as though our emitter is lighting it.
 pub fn pre_box(burst: &Burst<'_>, cfg: &Config) -> LivenessReport {
     let pairs = burst.pairs();
     let whole = PixelRect { x0: 0, y0: 0, w: burst.width(), h: burst.height() };
@@ -196,8 +134,6 @@ pub fn pre_box(burst: &Burst<'_>, cfg: &Config) -> LivenessReport {
         |p| {
             let on = p.on.mean_in(&whole);
             if on <= 0.0 {
-                // No illumination at all: the ratio is undefined, and treating a
-                // divide-by-nothing as "clean" would be exactly backwards.
                 return Some(f64::INFINITY);
             }
             Some(p.off.mean_in(&whole) / on)
@@ -217,19 +153,12 @@ pub fn pre_box(burst: &Burst<'_>, cfg: &Config) -> LivenessReport {
     LivenessReport { results, pairs: pairs.len() }
 }
 
-/// The checks defined over the detected face region.
-///
-/// One box for the whole burst rather than one per pair: the frames are ~33 ms apart, a
-/// face does not travel far in that time, and the latency budget affords exactly one
-/// detection pass (wiki/06).
 pub fn post_box(burst: &Burst<'_>, face: &Rect, cfg: &Config) -> LivenessReport {
     let pairs = burst.pairs();
     let Some(roi) = face
         .clamped(burst.width(), burst.height())
         .and_then(|r| r.tiled(GRID))
     else {
-        // A box that does not survive clamping to the frame is not a region anything can
-        // be measured over. No results means no passes.
         return LivenessReport { results: Vec::new(), pairs: pairs.len() };
     };
 
@@ -246,8 +175,6 @@ pub fn post_box(burst: &Burst<'_>, face: &Rect, cfg: &Config) -> LivenessReport 
         results.push(r);
     }
 
-    // Motion compares *consecutive* OFF frames, so it is defined on gaps between pairs
-    // rather than on pairs. With n pairs there are n-1 comparisons.
     if pairs.len() >= 2 {
         let windows: Vec<Pair<'_>> = pairs
             .windows(2)
@@ -263,8 +190,6 @@ pub fn post_box(burst: &Burst<'_>, face: &Rect, cfg: &Config) -> LivenessReport 
                 if response <= 0.0 {
                     return None;
                 }
-                // Normalised by the response so it is a ratio, not an absolute — the same
-                // reason everything else here is.
                 Some(a.mean_abs_diff_in(&b, &roi) / response)
             })
         {
@@ -275,17 +200,10 @@ pub fn post_box(burst: &Burst<'_>, face: &Rect, cfg: &Config) -> LivenessReport 
     LivenessReport { results, pairs: pairs.len() }
 }
 
-/// Both halves, for callers that already hold a box and do not need the early-out.
 pub fn evaluate(burst: &Burst<'_>, face: &Rect, cfg: &Config) -> LivenessReport {
     pre_box(burst, cfg).merge(post_box(burst, face, cfg))
 }
 
-/// Coefficient of variation of the per-cell response — the falloff metric.
-///
-/// Expressed as std/mean rather than raw std so it stays comparable across captures at
-/// different distances and different AGC states. A negative mean means the "ON" frame was
-/// darker than the "OFF" one over this region, which is not a falloff shape at all; it
-/// reports 0 so a degenerate-flatness floor treats it as the failure it is.
 pub fn falloff_cv(d_cells: &[f64]) -> f64 {
     if d_cells.is_empty() {
         return 0.0;
@@ -298,29 +216,7 @@ pub fn falloff_cv(d_cells: &[f64]) -> f64 {
     var.sqrt() / m
 }
 
-/// Ratio of response in the centre cells to response in the border ring.
-///
-/// **Reporting only. This is not a liveness check, and the corpus does not yet support
-/// making it one.**
-///
-/// A second, directional read on the same physics as [`falloff_cv`]: on a face the centre
-/// outshines the periphery, so this sits above 1; on a flat surface held square to the
-/// camera it sits near 1.
-///
-/// The 2026-08-19 print corpus supports that direction — prints 0.876–0.918 against live
-/// 1.446–1.774 — but not by enough to gate on (wiki/11 B24). The corpus test reports the
-/// worst of 41 pairs; the daemon judges 3. **Per pair, the print's best reading is 1.443
-/// against the weakest live capture's worst of 1.446** — a ~0.2% margin, from one print
-/// object and one human subject, with no print recorded at daylight ambient. A bare
-/// ceramic mug reads 1.800, above every live face, so the statistic responds to convex
-/// geometry rather than to liveness.
-///
-/// It stays a reported column. The guards below are what an enforced version would need
-/// anyway, and they were written while auditing it for exactly that.
 pub fn centre_edge_ratio(d_cells: &[f64]) -> f64 {
-    // `falloff_cv` guards its own degenerate inputs; this had no analogue, and a `pub fn`
-    // that indexes a fixed grid will panic on a short slice. A panic on the daemon's path
-    // is a refused unlock, so it is guarded rather than documented.
     if d_cells.len() < GRID * GRID {
         return 0.0;
     }
@@ -340,19 +236,6 @@ pub fn centre_edge_ratio(d_cells: &[f64]) -> f64 {
         }
     }
 
-    // Every degenerate case returns the **failing** value, because the only sensible
-    // wiring for a centre-brightness statistic is `Fails::Below`. This is the same choice
-    // `falloff_cv` makes at its non-positive-mean guard, and the deliberate opposite of
-    // `dark_ratio`'s INFINITY — that one is `Fails::Above`, where returning a huge number
-    // is the safe direction. The direction of the check decides, not the arithmetic.
-    //
-    // A non-positive edge mean means the border did not respond to the emitter, or
-    // responded backwards. The previous code returned `INFINITY` there, and a
-    // uniformly-negative field returned a large *positive* ratio — both of which sail past
-    // any minimum threshold as "maximally live". An attacker chooses what surrounds a
-    // presented object, so a matte-black IR-absorbing border is exactly the input that
-    // reaches this branch. No corpus placement triggers it today; that makes it latent,
-    // not benign.
     let e = mean(&edge);
     if e <= 0.0 { 0.0 } else { mean(&centre) / e }
 }
@@ -376,19 +259,10 @@ mod tests {
         Rect { x: 0.0, y: 0.0, w: W as f32, h: H as f32 }
     }
 
-    /// The B9 regression, and the single most important test in this module.
-    ///
-    /// One contaminated pair out of four. A per-pair rule, a median, or a k-of-n vote all
-    /// let this through. Only conjunction rejects it.
     #[test]
     fn one_contaminated_pair_sinks_the_whole_burst() {
         let on = domed(W, H, 60, 10);
         let dark = blank(W, H, 0);
-        // Contamination at roughly the ratio the real attack produced — wiki/11 B9 pair 1
-        // read mean(ON) 82.93 against mean(OFF) 9.29, so the OFF frame is polluted but
-        // still an order of magnitude darker than the ON frame beside it. That is what
-        // makes it dangerous: it stays classified as an OFF frame and the alternation
-        // survives, so nothing upstream notices. See the test below for the louder case.
         let flooded = blank(W, H, 5);
 
         let clean = strobe(&on, &dark, 4);
@@ -407,8 +281,6 @@ mod tests {
         assert_eq!(r.check, Check::DarkFrame);
         assert_eq!(r.failing_pairs, 1, "exactly one pair was contaminated");
 
-        // And the point of the bug: three of four pairs were spotless. A rule that looked
-        // at the median, or required a majority to fail, would have passed this.
         let dark_result = dirty_report.get(Check::DarkFrame).unwrap();
         assert!(
             dark_result.failing_pairs * 2 < dirty_report.pairs,
@@ -416,26 +288,11 @@ mod tests {
         );
     }
 
-    /// The louder half of the same attack.
-    ///
-    /// **Which layer catches this changed at [B18], and the change is an improvement.**
-    /// Before, a contaminant bright enough to rival the ON frame pushed the glare frame
-    /// above `classify`'s *global* ON/OFF split, the alternation appeared to break, and the
-    /// burst was refused as a tier mismatch — rejected because the classifier had been
-    /// confused, not because anything detected an attack. B18 replaced that split with a
-    /// comparison against immediate neighbours, which labels the glare frame correctly as
-    /// the OFF frame it is. So the burst now forms, and the attack is rejected by the check
-    /// built to reject it, naming itself in the verdict.
-    ///
-    /// The cost is real and is recorded rather than glossed: this input used to be refused
-    /// at two independent layers and is now refused at one. That makes the dark-frame check
-    /// load-bearing on its own for the loud floodlight case, which is why replacing it
-    /// (wiki/11 B18's open item) cannot be done without re-running this test.
     #[test]
     fn a_bright_contaminant_is_rejected_by_the_check_built_for_it() {
-        let on = domed(W, H, 60, 10); // mean ~41
+        let on = domed(W, H, 60, 10);
         let dark = blank(W, H, 0);
-        let glare = blank(W, H, 30); // bright enough to rival the ON frame
+        let glare = blank(W, H, 30);
         let bytes = strobe_one_contaminated(&on, &dark, &glare, 4, 2);
         let c = cfg();
 
@@ -460,9 +317,6 @@ mod tests {
         assert!(report.get(Check::Response).unwrap().passed());
     }
 
-    /// The falloff test's mechanism, on data where the answer is known. If a curved
-    /// reflector does not out-score a flat one here, the print-rejection claim in wiki/05
-    /// has nothing behind it at all.
     #[test]
     fn a_curved_reflector_has_higher_falloff_than_a_flat_one() {
         let dark = blank(W, H, 0);
@@ -480,8 +334,6 @@ mod tests {
         assert!(curved_cv > flat_cv * 10.0, "curved {curved_cv} vs flat {flat_cv}");
     }
 
-    /// Absolute brightness must not move the falloff verdict. AGC droop moves the ON
-    /// series 13% inside one capture and 10x between sessions (wiki/10 Probe 3b).
     #[test]
     fn falloff_is_invariant_to_overall_gain() {
         let dark = blank(W, H, 0);
@@ -491,14 +343,11 @@ mod tests {
             let b = Burst::from_planar(&bytes, W, H, &c).unwrap();
             evaluate(&b, &whole_face(), &c).get(Check::Falloff).unwrap().worst
         };
-        // Same shape, double the gain.
         let bright = cv_at(120, 20);
         let dim = cv_at(60, 10);
         assert!((bright - dim).abs() < 0.02, "gain must not move CV: {bright} vs {dim}");
     }
 
-    /// A flat print fails a floor set anywhere above zero — this is what the
-    /// degenerate-flatness floor buys, and the whole of what it buys.
     #[test]
     fn a_flat_presentation_fails_an_enforced_flatness_floor() {
         let dark = blank(W, H, 0);
@@ -515,8 +364,6 @@ mod tests {
         assert!(evaluate(&face, &whole_face(), &c).rejection().is_none());
     }
 
-    /// An advisory check that fails must be reported and must not reject. This is the
-    /// mechanism that keeps the verdict honest about what the corpus can actually support.
     #[test]
     fn an_advisory_failure_reports_without_rejecting() {
         let dark = blank(W, H, 0);
@@ -533,8 +380,6 @@ mod tests {
         assert_eq!(failures[0].check, Check::Falloff);
     }
 
-    /// Conjunction over an empty set is true. If a check is ever evaluated over no pairs
-    /// it must produce no result at all, not a pass.
     #[test]
     fn no_pairs_yields_no_results_rather_than_empty_passes() {
         let px = blank(W, H, 60);
@@ -544,14 +389,11 @@ mod tests {
             Some(0.0)
         });
         assert!(r.is_none(), "an empty burst must not manufacture a passing check");
-        // And a measurement that never succeeds is likewise not a pass.
         let one = [Pair { on: frame, off: frame }];
         let r = conjunctive(Check::Response, Threshold::enforced(1.0), Fails::Below, &one, |_| None);
         assert!(r.is_none());
     }
 
-    /// A face box that lands entirely outside the frame must yield nothing measurable,
-    /// never a silent pass on the checks that were supposed to run over it.
     #[test]
     fn a_box_off_the_frame_produces_no_post_box_results() {
         let dark = blank(W, H, 0);
@@ -578,13 +420,6 @@ mod tests {
         assert!(centre_edge_ratio(&dome) > 1.2);
     }
 
-    /// Every degenerate input must return the value that **fails** a minimum threshold.
-    ///
-    /// This is the direction that matters: the statistic is only ever wired `Fails::Below`,
-    /// so a degenerate case returning `INFINITY` — which the old code did — passes as
-    /// maximally live. The border of a presented object is the region an attacker chooses,
-    /// which makes "the edge cells did not respond" an input to design for rather than an
-    /// impossibility. No corpus placement produces one today (wiki/11 B24).
     #[test]
     fn centre_edge_fails_closed_on_every_degenerate_input() {
         let dark_border = {
@@ -609,7 +444,6 @@ mod tests {
         };
         assert_eq!(centre_edge_ratio(&all_negative), 0.0, "ON darker than OFF is not a dome");
 
-        // A short slice used to panic, and a panic on the daemon's path is a refused unlock.
         assert_eq!(centre_edge_ratio(&[]), 0.0);
         assert_eq!(centre_edge_ratio(&[1.0; GRID * GRID - 1]), 0.0);
     }

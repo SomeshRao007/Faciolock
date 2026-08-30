@@ -1,47 +1,14 @@
-//! One structured line per attempt (wiki/03 R9).
-//!
-//! ## Why stderr and not `libsystemd`
-//!
-//! systemd already captures a service's stderr into the journal, and it parses a leading
-//! `<N>` — the syslog priority, the same convention `sd-daemon.h` documents — off the front
-//! of each line. So the priority in `journalctl -p` costs three characters, and the
-//! alternative costs a native dependency in the process that parses attacker-controlled
-//! pixels. ponytail: three characters. Structured `_FIELDS` via the native protocol would
-//! need `sd_journal_send`, and nothing yet needs to *query* by field.
-//!
-//! ## One construction site
-//!
-//! Every path through `Daemon::authenticate` that produces an answer emits exactly one line
-//! — [`attempt`] for the paths that reached a verdict or a refusal, [`not_enrolled`] for the
-//! one that has no verdict to report. That is the same discipline as the single
-//! `PAM_SUCCESS` site (wiki/09) and the single `Allow` site (`serve::to_wire`), applied to
-//! the log: an attempt that returned without a record would be an attempt nobody could audit.
-//!
-//! A **cancelled** request is the one thing that does not produce a line here. It has its own
-//! log line at info and no answer goes back, because nobody is waiting for one — and it is
-//! not an attempt, so counting or auditing it as one would be wrong in the same way.
-//! `Op::Status` is not logged either: it is a probe that touches nothing and answers whether
-//! a template exists, and logging it would bury the attempts in it.
-//!
-//! What is logged here is the **detailed** verdict — which check rejected, at what value.
-//! What crosses the socket stays narrow, because telling a caller which check rejected them
-//! is telling an attacker what to fix (wiki/04).
+// ponytail: plain text, not _FIELDS, see wiki/14
 
 use faciolock_vision::{Outcome, Verdict};
 
 use crate::ratelimit::Decision;
 
-/// Syslog priorities, as systemd parses them off a stderr line.
 const ERR: u8 = 3;
 const WARNING: u8 = 4;
 const NOTICE: u8 = 5;
 const INFO: u8 = 6;
 
-/// One authentication attempt, whatever came of it.
-///
-/// `refused` is `Some` when the rate limiter answered before any biometric work happened; in
-/// that case there is no `Outcome` to describe, and the line says so rather than inventing
-/// one.
 pub fn attempt(
     uid: u32,
     peer: &str,
@@ -53,11 +20,6 @@ pub fn attempt(
     emit(priority, &body);
 }
 
-/// Split from [`attempt`] so the line can be asserted rather than only printed.
-///
-/// `eprintln!` is not capturable from a test, and the shape of this string is not cosmetic:
-/// `tools/ratelimit-try.sh` greps it, and so will whoever is reading a journal at the point
-/// they most need it to parse.
 fn attempt_line(
     uid: u32,
     peer: &str,
@@ -80,8 +42,6 @@ fn attempt_line(
             );
         }
         (Some(outcome), None) => outcome,
-        // Nothing measured and nothing refused: the store failed, or the camera did. The
-        // caller still gets an answer, so the journal still gets a line.
         (None, None) => {
             return (
                 INFO,
@@ -105,13 +65,6 @@ fn attempt_line(
     )
 }
 
-/// A request for a user with no template.
-///
-/// Its own function rather than a `Verdict` arm because there is no verdict for it — the
-/// pipeline never ran, so there is no `Outcome` to describe and nothing measured to report.
-/// Logged at info: on a machine where the module is installed and nobody has enrolled, this
-/// is every lock screen and every `sudo`, and putting that at warning would train an
-/// operator to ignore the level. R9 wants the line; it does not want it shouted.
 pub fn not_enrolled(uid: u32, peer: &str, elapsed_ms: u128) {
     emit(
         INFO,
@@ -121,21 +74,10 @@ pub fn not_enrolled(uid: u32, peer: &str, elapsed_ms: u128) {
     );
 }
 
-/// A cleared lockout is a security-relevant state change and gets its own line. Only when
-/// something was actually cleared — `acct_mgmt` fires on every successful login.
 pub fn cleared(uid: u32, peer: &str) {
     emit(NOTICE, &format!("clear uid={uid} event=lockout-cleared {peer}"));
 }
 
-/// One pose of a guided enrolment (Phase 5).
-///
-/// **Enrolment is a write to the template store**, so R9's one-line-per-attempt rule applies
-/// to it at least as hard as to authentication. A3 is about a template that was *implanted*;
-/// a template that appeared with nothing in the journal saying who wrote it, from what peer,
-/// and when, is that attack with the evidence already deleted.
-///
-/// `refused` is `None` for a pose that was captured. `poses` is the count *after* this one,
-/// so a reader can see an enrolment progress and can see one that stalled.
 pub fn enrol_pose(uid: u32, peer: &str, elapsed_ms: u128, poses: usize, refused: Option<&Verdict>) {
     let (priority, reason) = match refused {
         None => (INFO, "reason=captured".to_string()),
@@ -150,8 +92,6 @@ pub fn enrol_pose(uid: u32, peer: &str, elapsed_ms: u128, poses: usize, refused:
     );
 }
 
-/// The store was written. At notice, next to the other line that means a template now
-/// decides who gets in — a successful match.
 pub fn enrolled(uid: u32, peer: &str, embeddings: usize) {
     emit(
         NOTICE,
@@ -162,9 +102,6 @@ pub fn enrolled(uid: u32, peer: &str, embeddings: usize) {
     );
 }
 
-/// `<N>` is the syslog priority; systemd strips it off stderr and the rest is the line.
-/// The caller supplies its own event word, so `journalctl … | grep 'faciolockd: auth'`
-/// selects attempts and nothing else.
 fn emit(priority: u8, body: &str) {
     eprintln!("<{priority}>faciolockd: {body}");
 }
@@ -173,14 +110,11 @@ fn priority_of(verdict: &Verdict) -> u8 {
     match verdict {
         Verdict::Match { .. } => NOTICE,
         Verdict::NoMatch { .. } | Verdict::NotLive { .. } | Verdict::NoFace => WARNING,
-        // Not failures. A bright room or a busy camera is the daemon declining to answer,
-        // and logging those at warning would train an operator to ignore the level.
         Verdict::Environment { .. } | Verdict::Unusable(_) => INFO,
         Verdict::Failed(_) => ERR,
     }
 }
 
-/// The wire name, not the Rust one, so a journal line and a PAM debug line agree.
 fn name_of(verdict: &Verdict) -> &'static str {
     match verdict {
         Verdict::Match { .. } => "Allow",
@@ -189,7 +123,6 @@ fn name_of(verdict: &Verdict) -> &'static str {
     }
 }
 
-/// R9's "reason, liveness score, match distance", one `key=value` group per verdict shape.
 fn detail_of(verdict: &Verdict) -> String {
     match verdict {
         Verdict::Match { similarity, agreeing } => {
@@ -204,17 +137,10 @@ fn detail_of(verdict: &Verdict) -> String {
             format!("reason=ambient floor={ambient_floor:.2}")
         }
         Verdict::Unusable(e) => format!("reason=unusable detail={e:?}"),
-        // Quoted: this is the one field carrying a free-form string, and an unquoted space
-        // in it would silently split into two bogus keys.
         Verdict::Failed(e) => format!("reason=failed detail={:?}", e),
     }
 }
 
-/// Every check that failed, enforced or advisory, or `pass`.
-///
-/// Advisory failures are included deliberately: they are the checks waiting on a spoof
-/// recording to calibrate against, and the journal is where the evidence for calibrating
-/// them accumulates. An advisory failure did not reject anything, and the `~` marks it.
 fn liveness_of(outcome: &Outcome) -> String {
     let mut failed: Vec<String> = outcome
         .liveness
@@ -247,8 +173,6 @@ mod tests {
         }
     }
 
-    /// The wire name is the narrow one and it must agree with `serve::to_wire`, or the
-    /// journal and the caller describe the same event differently.
     #[test]
     fn the_logged_name_matches_what_went_over_the_wire() {
         for verdict in [
@@ -269,8 +193,6 @@ mod tests {
         }
     }
 
-    /// Only a match is a notice; a failure of the pipeline itself is an error. If everything
-    /// shared a priority the level would carry no information.
     #[test]
     fn priorities_separate_a_refusal_from_a_fault() {
         assert_eq!(priority_of(&Verdict::Match { similarity: 0.9, agreeing: 2 }), NOTICE);
@@ -279,8 +201,6 @@ mod tests {
         assert_eq!(priority_of(&Verdict::Failed("x".into())), ERR);
     }
 
-    /// R9 wants the liveness detail, and an advisory failure must be distinguishable from
-    /// the enforced one that actually rejected the burst.
     #[test]
     fn advisory_failures_are_logged_and_marked_as_not_having_rejected() {
         let enforced = CheckResult {
@@ -308,8 +228,6 @@ mod tests {
         assert_eq!(liveness_of(&outcome(Verdict::NoFace, vec![])), "pass");
     }
 
-    /// Every field R9 names has to be in the line. Asserted on the formatted detail rather
-    /// than on the `eprintln`, which a test cannot read back.
     #[test]
     fn the_detail_carries_the_number_the_verdict_turned_on() {
         assert!(detail_of(&Verdict::NoMatch { best: 0.3124 }).contains("best=0.312"));
@@ -325,9 +243,6 @@ mod tests {
         assert!(live.contains("check=Falloff") && live.contains("worst=0.2661"), "{live}");
     }
 
-    /// **The whole line, as a journal would carry it.** R9's field list is the spec and
-    /// `tools/ratelimit-try.sh` greps this shape, so a format string edited without the
-    /// harness fails here rather than in front of a lock screen.
     #[test]
     fn the_assembled_line_carries_every_field_r9_asks_for() {
         let peer = "pid 27608 uid 0";
@@ -341,15 +256,11 @@ mod tests {
              pid 27608 uid 0 elapsed=673 counted=1"
         );
 
-        // Every field R9 names, present by name rather than by position.
         for field in ["uid=", "verdict=", "reason=", "elapsed=", "counted=", "live="] {
             assert!(body.contains(field), "{field} missing from {body}");
         }
     }
 
-    /// The two refusal shapes, which have no `Outcome` behind them and are what the harness
-    /// asserts on. `counted=` is load-bearing: R5's exemptions are a policy worth arguing
-    /// with, and a log that hid which way it went would make that unresolvable.
     #[test]
     fn a_refusal_produces_a_countable_line_at_the_right_level() {
         let (priority, body) =
@@ -366,8 +277,6 @@ mod tests {
         assert!(body.contains("reason=backoff") && body.ends_with("counted=0"), "{body}");
     }
 
-    /// A free-form failure string must not split into bogus keys — it is the one field
-    /// carrying arbitrary text, and it comes from error paths nobody controls the wording of.
     #[test]
     fn a_free_form_failure_message_stays_one_field() {
         let text = detail_of(&Verdict::Failed("camera vanished mid burst".into()));
