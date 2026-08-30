@@ -276,6 +276,38 @@ Target `systemd-analyze security faciolock.service` ≤ 2.0. Note
 `MemoryDenyWriteExecute=yes` may conflict with a JIT-ing inference runtime — one more
 input to the runtime choice in [08](08-open-questions.md).
 
+### As shipped — measured 2026-08-29
+
+[`data/systemd/faciolock.service`](../data/systemd/faciolock.service).
+**`systemd-analyze security` reads 0.6, SAFE**, against a target of 2.0. Measured offline
+(`--offline=true`) against the unit file, so the number is reproducible without installing
+anything. `MemoryDenyWriteExecute=yes` turned out to cost nothing: `tract` is a pure-Rust
+interpreter with no JIT and the models are mmap'd read-only, so [Q2](08-open-questions.md#q2--inference-runtime--decided-tract)
+settled this line as a side effect of settling the runtime.
+
+Everything the sketch above listed is in the unit, plus `ProtectKernelLogs`, `ProtectClock`,
+`ProtectHostname`, `ProtectProc=invisible`, `ProcSubset=pid`, `RestrictSUIDSGID`, `RemoveIPC`,
+an empty `CapabilityBoundingSet`, `RestrictAddressFamilies=AF_UNIX`, `IPAddressDeny=any` and
+`SystemCallFilter=~@resources @privileged` on top of `@system-service`.
+
+Four corrections to the sketch, each of which would have scored better than it deserved:
+
+| Sketch | Shipped | Why |
+|---|---|---|
+| `DeviceAllow=/dev/video* rw` | `DeviceAllow=char-video4linux rw` | The glob is a *path*, and the numbering renumbers across boots ([10 Probe 4](10-hardware-probe.md#probe-4--device-node-disambiguation)). The device class does not. |
+| `ReadWritePaths=/var/lib/faciolock` | `StateDirectory=faciolock` | Creates the directory 0700 owned by the daemon's user on first start, rather than requiring something else to have made it first. |
+| (absent) | `SupplementaryGroups=video` | `/dev/video2` is `root:video 0660`. This is the daemon's one privilege over a plain unprivileged process, and without it `User=faciolock` cannot open the camera at all. |
+| (implied) | **no `PrivateDevices`, no `PrivateUsers`** | `PrivateDevices=yes` gives a private `/dev` with no video nodes in it. `PrivateUsers=yes` maps every group but the service's own to `nobody`, which takes `video` with it. Both score well and neither runs. |
+
+The three findings `systemd-analyze` still reports are the three that cannot be fixed without
+breaking the daemon — `SupplementaryGroups`, `PrivateUsers`, `DeviceAllow` — plus
+`RootDirectory=`, which would be a chroot for a service that already cannot write outside its
+state directory.
+
+This is also what makes wiki/04's honest note about the template key bearable. Anything
+running as `faciolock` can read the key; the sandbox is what keeps that "one process" rather
+than "any process that manages to be that user".
+
 ### R8 — No side effects outside the auth decision
 
 No `/dev/uinput`. No writing to the user's home. No network. No notifications from

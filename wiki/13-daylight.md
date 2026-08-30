@@ -91,12 +91,26 @@ after dark, 22:0x 53.922   0.000  57.930   0.001  57.528   0.001  57.220   0.001
 Both readings are the same command on the same machine the same evening, which is what makes
 the pair worth more than either number alone:
 
-| | wiki/10 Probe 3 (night) | daylight, 15:21 | after dark, same day |
-|---|---|---|---|
-| OFF floor | ~0.004 | **~21** | 0.000–0.001 |
-| ON level | ~54–62 | ~77 | ~54–58 |
-| ratio | 14,000:1 (100,000:1 on 3b) | **3.5:1** | **89,857:1** |
-| alternation | perfect from frame 5 | **1.00** | **1.00** |
+| | wiki/10 Probe 3 (night) | daylight, 15:21 | after dark, same day | morning, 2026-08-30 |
+|---|---|---|---|---|
+| OFF floor | ~0.004 | **~21** | 0.000–0.001 | **~1.1**, then ~4.6 two hours later |
+| ON level | ~54–62 | ~77 | ~54–58 | ~53–60 |
+| ratio | 14,000:1 (100,000:1 on 3b) | **3.5:1** | **89,857:1** | **44.8:1**, then **11.0:1** |
+| alternation | perfect from frame 5 | **1.00** | **1.00** | **1.00** in both |
+
+The fourth column arrived unplanned, from an operator running `diagnose` on a fresh install and
+then again two hours later as the room got brighter. It is the most useful of the four because
+it is *intermediate*: the first three are the two extremes and a repeat of one of them, and a
+hypothesis that only ever sees endpoints is not being tested. The floor climbs 0.004 → 1.1 →
+4.6 → 21 across the four, the ratio falls 89,857 → 44.8 → 11.0 → 3.5 with it, monotonically —
+and **the alternation reads 1.00 at every single point.** Four orders of magnitude of ambient
+infrared, one statistic that does not notice.
+
+It also puts a number on when enrolment stops working, which nothing had. `ambient_floor_max`
+is **0.04** and the gate takes the *minimum* frame mean, so the 1.1 reading is already 27×
+over the limit and the 4.6 reading is 115× over. Enrolment refuses in both — hours before a
+room looks bright to a person, and that is the honest shape of B18 rather than a daylight
+problem.
 
 **The emitter is not what changed. The floor is.** Ambient infrared lifts the dark frames by
 four orders of magnitude and the ratio collapses with them — which is [B18], seen from a new

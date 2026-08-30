@@ -180,6 +180,44 @@ number, is the evidence for gating the tier on the pattern.
 enrolment pose cost 6.6 s in the debug build against wiki/06's 85 ms for SFace, so a debug
 `bench` measures unoptimised `tract` and nothing else.
 
+**Phase 6 is under way, and its first item unbuilt one of the plan's oldest assumptions.**
+Socket activation and idle-exit are built and demonstrated — the daemon exits after 30 s
+idle, `pidof faciolockd` is empty, and the next `connect()` brings it back — and the sandbox
+reads **0.6 SAFE** against a target of 2.0. But **the pre-warm agent was specified against a
+signal that does not exist** (P6-a). It pokes on the *lock* signal, and the cost it exists to
+hide is paid on *return*, minutes later, after the daemon has already idle-exited. There is
+no signal a session agent can subscribe to that fires when a person comes back but before the
+greeter calls PAM. The ~800 ms stays visible, `idle_timeout_secs` is the only honest lever,
+and it is config.
+
+`cargo-fuzz` needed nightly this machine does not have, so the properties are also asserted
+by seeded generators in `cargo test`. **Both of those tests failed their own first run and
+both failures were the generator, not the parser** — random bytes reached the response
+decoder 21 times in 200,000, and a random truncation landed on a frame boundary one byte in
+64. Each test asserts a floor on how often it actually reached the code under test, and
+without those two assertions both would have passed convincingly while exercising the early
+returns.
+
+**It is installed, and installing it found two bugs the tests could not.** `install-local.sh`
+put the units, the `faciolock` user, the sandbox and the module on the reference machine on
+2026-08-30, and the first command an operator runs on a fresh install —
+`faciolockctl diagnose` — failed twice in a row. [B25](11-bug-log.md#b25): the courtesy
+"daemon answering" line **started the daemon**, which took the camera two seconds before
+`diagnose` tried to measure it. [B26](11-bug-log.md#b26): the installer had written a
+placeholder config, and P5-e's never-overwrite rule made it permanent, so `diagnose --write`
+could only ever refuse.
+
+Both are the same shape and it is worth naming: **socket activation changed what `connect()`
+means, and only the daemon's side of it was reviewed.** `serve::inherited` refuses a malformed
+activation and the socket is not unlinked when systemd owns it — careful work, on the wrong
+side of the socket. Nothing looked at the callers, where a read-only probe had silently become
+a service start.
+
+What the same install *proved* is the phase's other half, and a harness could not have: the
+journal shows two full activations on one socket inode, the sandbox running the real workload
+as `faciolock` — camera opened, both models verified under `ProtectSystem=strict`, warm in
+335–339 ms, unchanged since Phase 2 — and both idle-exits landing at exactly 30 s.
+
 ## Index
 
 | Page | What's in it |
@@ -197,6 +235,7 @@ enrolment pose cost 6.6 s in the debug build against wiki/06's 85 ms for SFace, 
 | [11 — Bug Log](11-bug-log.md) | Bugs hit and fixed, with the design changes they forced |
 | [12 — Falloff Calibration Log](12-falloff-calibration.md) | Recording sessions and readings for the falloff check; S5 is still open |
 | [13 — Daylight](13-daylight.md) | The daylight question in one place: what blocks it, the ways out ranked by cost, what is already refuted |
+| [14 — Tuning Constants](14-tuning-constants.md) | Every hardcoded number in the source, its value, and what it was chosen against |
 
 ## One-paragraph summary
 
@@ -250,6 +289,10 @@ wall-clock, zero RSS when idle.
 | P5-d | **Enrolment is three poses, accumulated in the daemon, with a 60 s expiry.** One `Op::Enroll` per pose and no protocol change: `ENROL_POSES` is a shared constant because both ends count. The daemon accumulates rather than the CLI because a CLI that gathered embeddings and handed them back would make the store write a function of the peer's bytes | 2026-08-23 |
 | P5-e | **`diagnose` only ever asserts a tier upward.** It writes `ir-strobe` on a clean strobe and writes nothing otherwise. "No strobe here" and "somebody is pointing a floodlight at this" are the same measurement, and [B18](11-bug-log.md#b18) showed daylight alone produces it — so an automatic demotion would hand back the attack P1-e exists to prevent | 2026-08-23 |
 
+| P6-a | **The pre-warm agent is deferred, and not for cost — the design does not work.** It cannot reach a 0600 root socket from a user session, and worse, it pokes at the wrong end of the absence: it warms on *lock*, and the ~800 ms it exists to hide is paid on *return*, after the daemon has idle-exited. No session signal fires when a person comes back but before the greeter calls PAM. `idle_timeout_secs` is the lever instead, and it is config because the trade — ~800 ms against a resident process holding a camera — is an operator's to make | 2026-08-29 |
+| P6-b | **PAM ships as one `pam-auth-update` profile, not six `pam.d` files.** All six services include `common-auth` and `common-account` (verified, not assumed), so one profile reaches all six and one `--remove` takes it back — the supported uninstall a hand-edited file does not have. The profile gained an `Account:` section wiki/07's sketch lacked: without it `pam_sm_acct_mgmt` is never called, so P4-b's lockout release never runs. **A first trial still goes in `/etc/pam.d/sudo` by hand**, because the profile is all-or-nothing and a trial you can only evaluate by locking your own screen is not a trial | 2026-08-29 |
+| P6-c | **Idle-exit is honoured only when the socket was inherited from systemd.** A self-bound daemon that exits on a timer has nothing to reactivate it — that is not an idle-exit, it is a crash on a schedule, and it would take every `tools/*-try.sh` harness with it. Same file, same timeout, different meaning depending on who owns the socket | 2026-08-29 |
+
 Still open: Q9 (name), and whether the real recordings are ever published (deferred to ITP —
 publishing is irreversible, so it is not decided early). Q5 closed 2026-08-23 (P4-a) and
 names what would re-open it; Q4 closed 2026-08-23 (P5-a) and names what would re-open it.
@@ -288,7 +331,9 @@ hardware and resolves to the RGB camera —
 | A template copied to another machine is unusable | **verified 2026-08-23**, in CI. There is no second machine here, so "another machine" is modelled as what one *is* to this format — a different key — and the test asserts the two stores genuinely generated different keys, so the refusal is not passing for an unrelated reason. A template renamed to another uid fails too, which is the implantation half |
 | The failure budget survives a daemon restart | **verified 2026-08-23** — `sudo tools/ratelimit-try.sh`, 23/23, against the real socket: the file outlives `kill -9` and a restarted daemon refuses on it. That the write lands *before* the reply is shown indirectly, by `Op::Clear` removing the entry from disk while the daemon still runs; the direct version needs a failure the daemon recorded itself, which needs a camera |
 | A locked-out user is refused **before** the camera and the store | **verified 2026-08-23** — same user, same daemon, answers `NoEnrolment` the instant the lockout is cleared, so the budget is what answered first |
-| A denied face moves the failure counter | **unobserved, and not reachable without hardware.** Every verdict the harness can produce is exempt from counting by design; a counting one needs a face in front of a real camera |
+| A denied face moves the failure counter | **verified 2026-08-23**, by Phase 5's harness rather than Phase 4's — it needed an enrolment, which needed `faciolockctl`. Three bursts of a face that was not the enrolled one: `Deny, Deny, Deny`, `ratelimit.db` reading `1000 3 …`, all three logged `counted=1`. P2-g's exemption held at the same time: nothing that never saw a face was counted |
+| The daemon leaves no process behind when idle | **verified 2026-08-29** — under `systemd-socket-activate` against the shipped binary: `socket-activated`, camera warm in 339 ms, `idle for 3 s, exiting`, `pgrep -x faciolockd` empty, and the socket inode still present. Measured with a 3 s timeout rather than the shipped 30 so it can be watched; the mechanism is under test, not the number. **Reactivation on that surviving inode is a separate claim and is not yet verified** — the harness `exec()`s the daemon rather than supervising it, so only an installed `faciolock.socket` can show it |
+| The daemon's sandbox meets its target | **verified 2026-08-29** — `systemd-analyze security --offline=true` reads **0.6 SAFE** against a target of 2.0 ([03 R7](03-pam-and-security.md#as-shipped--measured-2026-08-29)). Offline against the unit file, so it is reproducible without installing anything |
 | The ambient gate keys on a quantity **only the attacker can raise** | **refuted 2026-08-09** — presenting a bright object 40 cm from the lens collapses the floor 2,170×: the operator's own face read 28.221 and was *gated*, a ceramic mug in the same minute read 0.013 and *passed*. The AGC shortens exposure for a bright near object and the pedestal follows, so the attacker sets the gate's input ([B20](11-bug-log.md#b20)) |
 | Falloff separates a live face from a **flat print** | **still unmeasured, after three recording attempts.** A flat blank page was captured 2026-08-09 and cannot settle it: with no face to detect, the ROI must be chosen, and across valid placements CV spans 0.036–1.71 (median 0.249) against a worst live of 0.2661 — wider than the live band, so the choice decides the answer ([B21](11-bug-log.md#b21)). Needs a flat presentation of a FACE, so detection supplies the ROI. A blank page is an *optimistic* stand-in, not a conservative one: print albedo adds variance falloff cannot distinguish from depth |
 | The camera reports **exposure time** per frame, which would fix B20's gate | **refuted 2026-08-09.** The `UVCM` metadata node streams, and over 30 frames it carries **zero `CaptureStats`**. This firmware does not report its integration time, so pedestal ÷ exposure — the one candidate for a gate input the attacker cannot pull down — has no input here ([10/Probe 8](10-hardware-probe.md#probe-8--the-metadata-node)) |

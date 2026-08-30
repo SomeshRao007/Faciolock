@@ -68,6 +68,93 @@ Auth-Initial:
 
 This also gives us a supported uninstall path, which hand-edited `pam.d` files do not.
 
+**The sketch above was missing a line, and Phase 4 needs it.** The profile as drafted has no
+`Account:` section, and [P4-b](README.md#decisions-taken) put the lockout release in
+`pam_sm_acct_mgmt`. Without an account line the module is never called after a successful
+login, so the failure budget is never cleared: three refused faces disable face unlock until
+somebody restarts the daemon. The shipped profile is
+[`data/pam-configs/faciolock`](../data/pam-configs/faciolock) and it carries
+`Account-Type: Additional` with an `optional` control — `optional` rather than `required`
+because the module returns `PAM_IGNORE` on every path by design, and an account-stack failure
+refuses a login outright instead of falling through to a password.
+
+## Rolling it out, and getting back out
+
+Verified on the reference machine, not assumed: all six services in the table above include
+`common-auth` and `common-account`, so one `pam-auth-update` covers all six.
+
+```text
+/etc/pam.d/sudo   /etc/pam.d/su   /etc/pam.d/login   /etc/pam.d/sddm
+/usr/lib/pam.d/kde   /usr/lib/pam.d/polkit-1
+```
+
+Note the last two: on Kubuntu 25.10 there is **no `/etc/pam.d/kde` and no
+`/etc/pam.d/polkit-1`.** They are vendor files under `/usr/lib/pam.d/`, from
+`libkscreenlocker6` and `polkitd`. Writing a fresh `/etc/pam.d/kde` shadows the vendor one
+entirely, so a two-line file there does not add face unlock to the lock screen — it *replaces*
+the lock screen's whole authentication stack with two lines. That is the misconfiguration
+KDE's own documentation warns produces a screen you cannot unlock.
+
+### The order, and why it is this order
+
+`sudo` first, alone, and not through `pam-auth-update`. The profile is all-or-nothing by
+construction — it edits `common-auth`, which every service includes — so there is no way to
+enable it for one service. A first trial that can only be evaluated by locking your own screen
+is not a trial. `sudo` fails safe in a way the lock screen does not: a `sudo` that refuses is
+a shell you already have.
+
+```text
+1.  /etc/pam.d/sudo, by hand, one line          <- reversible from the shell you are in
+2.  live with it                                <- the failure modes are boring by now
+3.  pam-auth-update, all six                    <- supported, packaged, reversible
+```
+
+### The single line, and what makes it safe
+
+Back the file up first — the undo below depends on it existing:
+
+```bash
+sudo cp /etc/pam.d/sudo /etc/pam.d/sudo.faciolock-backup
+```
+
+```
+auth	[success=end default=ignore]	pam_faciolock.so
+```
+
+`default=ignore` is the whole recovery story. **Every** outcome that is not a success —
+daemon down, socket missing, not enrolled, rate-limited, refused, malformed reply, panic
+caught at the FFI boundary — falls through to the next line in the file, which is
+`@include common-auth`, which is the password prompt. wiki/09 Phase 3's failure table is the
+evidence for that sentence: every one of those paths was observed returning
+`PAM_AUTHINFO_UNAVAIL` or `PAM_USER_UNKNOWN`, and neither is a success.
+
+The line goes **above** `@include common-auth`, and `pam_faciolock.so` must be findable —
+`/usr/lib/x86_64-linux-gnu/security/` on Debian and Ubuntu.
+
+### Getting back out
+
+Before the edit, open a second terminal and hold a root shell in it:
+
+```bash
+sudo -i
+```
+
+That shell is the recovery path and it does not care what `/etc/pam.d/sudo` says afterwards,
+because it authenticated before the edit. From it, either line undoes everything:
+
+```bash
+cp /etc/pam.d/sudo.faciolock-backup /etc/pam.d/sudo
+```
+
+```bash
+sed -i '/pam_faciolock/d' /etc/pam.d/sudo
+```
+
+If both terminals are lost as well — a PAM file broken badly enough to refuse `sudo` outright
+— the recovery is a root shell from the boot menu: hold Shift for GRUB, pick the recovery
+entry, and `/etc/pam.d/` is a normal file on a normal filesystem. Nothing in this design can
+make a machine unbootable; the worst it can do is make one service refuse to authenticate.
+
 ## Settings UI
 
 The goal is "feels built-in", and for KDE that concretely means a KCM (System

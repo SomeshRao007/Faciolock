@@ -9,6 +9,10 @@ to fix.
 
 | # | Bug | Severity | Status |
 |---|---|---|---|
+| [B28](#b28) | **`bench`'s first sample is the daemon cold start**, and at n=20 that sample *is* the p99 and the max | **high** | fixed; one unmeasured warm-up first, as [B15](#b15) |
+| [B27](#b27) | **One refused enrolment pose disabled idle-exit permanently** — the daemon fell into a blocking `accept` and never re-polled | **high** | fixed; the decision is a function now, and asserted |
+| [B26](#b26) | The installer created a **placeholder config**, which permanently blocked `diagnose --write` | medium | fixed; the installer creates the directory and nothing else |
+| [B25](#b25) | **`diagnose` started the daemon that then took the camera it was about to measure** | **high** | fixed; it stats the socket instead of connecting to it |
 | [B24](#b24) | **A flat printed face passes every liveness check.** `falloff_cv` cannot separate it — the print reads *above* the worst live face | **critical** | design finding, **open**. S5 answered on its bad-news branch. `centre_edge_ratio` does separate, but by ~0.2% at the burst length the daemon actually uses, from n=1 print and n=1 subject — no threshold taken. Liveness has **no** check that rejects a print |
 | [B23](#b23) | The socket's 0600 was bought with a **process-global** `umask`, and an unrelated directory inherited it | medium | fixed by bind-then-rename; `umask` removed entirely |
 | [B22](#b22) | The AGC settle frames were discarded **twice**, leaving 1 frame of 6 | **high** | fixed at the daemon's config seam; found by the first end-to-end run |
@@ -31,6 +35,207 @@ to fix.
 | [B3](#b3) | `2>/dev/null` hid a missing binary as "no evidence" | medium | documented |
 | [B2](#b2) | Half the `/dev/videoN` nodes are not cameras | low | fixed |
 | [B1](#b1) | Dead conditional in `build_pairs` | trivial | removed |
+
+---
+
+## B28 — `bench`'s first sample is a process start, and at n=20 it *is* the p99 {#b28}
+
+**Severity: high**, and entirely latent: `bench` is the one subcommand nothing had ever run,
+so its first output was going to be believed.
+
+### What happened
+
+The loop measured every iteration and discarded none:
+
+```rust
+for i in 1..=runs {
+    let answer = ask(settings, Op::Auth, &user)?;
+    samples.push(answer.round_trip.as_millis());
+```
+
+Under socket activation the first `ask` is what **starts the daemon**, and `client::ask`
+begins timing before `connect`. So sample 1 contains a model load and a SHA256 of 39 MB
+(377 ms), a V4L2 open, and the startup warm burst that `authenticate` then queues behind on
+the session mutex — none of which is an authentication.
+
+The reference machine's own audit log measured the gap during an ordinary enrolment:
+
+```text
+enrol pose 1   elapsed=1783        <- the request that started the daemon
+enrol pose 2   elapsed=421
+enrol pose 3   elapsed=397
+```
+
+**4.3×.** Sorted into 20 samples that lands last, and `percentile` takes
+`ceil(0.99 × 20) = 20` → `samples[19]`, the maximum. So `p99` and `max` were *exactly and
+only* the cost of starting a process, printed as the tail latency of a face unlock — into
+[06](06-performance-budget.md), which nominates this command as the source of that number.
+
+The footnote made it worse rather than better: *"p99 here is the slowest sample, not an
+estimate of one"* is true, and reads as a caveat about small `n` rather than a warning that
+the slowest sample is a one-off.
+
+### The fix
+
+One unmeasured authentication before the loop, announced so nobody wonders what it was.
+
+### The lesson
+
+**This is [B15](#b15) again**, which benchmarked inside the CPU's boost window and reported
+half the true cost; the fix there was a warm-up too. What changed is the size and the source:
+socket activation made the cold sample ~4× rather than ~1.5×, and made it the *normal* first
+unlock rather than an artefact of measuring. A benchmark's first iteration is a different
+operation from its others, and that is true again every time the process lifecycle changes
+underneath it.
+
+---
+
+## B27 — One refused enrolment pose disabled idle-exit permanently {#b27}
+
+**Severity: high.** It defeats the exit criterion of the phase that introduced it — "zero RSS
+when idle" — and it does so by leaving a camera streaming indefinitely.
+
+### What happened
+
+`serve::run` polls with a timeout and, on a timeout, exits only if nothing is half-finished:
+
+```rust
+Wait::Idle if daemon.may_idle_exit() => { /* exit */ }
+Wait::Idle => {}                              // <- "not now, carry on serving"
+```
+
+`accept` **blocks**. So "carry on serving" fell into a blocking accept and the loop never
+reached the poll again. The one poll that could have observed the enrolment expiring had
+already happened — 30 s in, against a 60 s `ENROL_EXPIRY` — and there was never a second one.
+A daemon that could not exit once could not exit ever, and sat holding `/dev/video2` open
+until some unrelated process happened to connect.
+
+**One refused pose was enough to reach it.** `Daemon::enrol` banks a `Pending` on its *failure*
+path as well, to preserve poses already given when a later one fails — so a single
+`Environment` refusal in a bright room creates a 0-pose `Pending` and pins the daemon. That is
+not a corner case on this hardware: [B18](#b18) means every enrolment attempt before dark ends
+that way, and the operator made nine of them in one morning.
+
+The daemon's own test asserted `may_exit` returns true for an expired `Pending`. It does.
+Nothing ever asked it a second time.
+
+### The fix, and the shape that hid it
+
+`Wait::Idle => continue`. One word — but the reason it shipped is that **the defect was
+invisible in the control flow**: an empty match arm reads as "do nothing", and what it
+actually meant was "fall into a blocking syscall". So the decision is now a function of its
+two inputs, returning `Accept` / `Poll` / `Exit`, and every combination is asserted —
+including that an `EINTR` must not be read as an idle timeout.
+
+### The lesson
+
+**An empty match arm is not "do nothing", it is "do whatever comes next".** When what comes
+next blocks, a fall-through is a state change. Any loop that mixes a timeout with a blocking
+call needs its control flow to be a value rather than a shape, because a shape cannot be
+tested and this one had three tests around it that all passed.
+
+---
+
+## B26 — The installer wrote a placeholder config, and P5-e made it permanent {#b26}
+
+**Severity: medium**, and it is the second half of the same afternoon as [B25](#b25) — both
+were found by one operator running one command on a freshly installed machine.
+
+### What happened
+
+`tools/install-local.sh` created `/etc/faciolock/faciolockd.toml` containing a single comment
+line, on the reasonable-sounding theory that an installed package should leave a config behind
+for the operator to edit.
+
+`probe::write_config` opens with `create_new(true)`. That is [P5-e](README.md#decisions-taken):
+`diagnose --write` must never overwrite an operator's config, so that a diagnostic run in a
+bright room cannot rewrite a working machine. The check is on the file's *existence*, because
+existence is the only thing a filesystem will tell you cheaply.
+
+So the placeholder was indistinguishable from a real config, and the one command with
+something to write could only ever answer `already exists and will not be overwritten`. On a
+fresh install the machine had no `device` and no `tier`, and no supported way to acquire them.
+
+### The fix, and why it is a deletion
+
+The installer now creates `/etc/faciolock/` and nothing inside it. Both readers already
+document a missing file as the correct fresh-install state:
+
+```rust
+// Config::load
+// A **missing** file is a fresh install and defaults are the right answer.
+// Settings::load
+// A missing file is a fresh install and the defaults are right.
+```
+
+Two components had already agreed on the convention and the installer disagreed with both.
+
+### The lesson
+
+**A placeholder is a value.** It looked like an empty gesture — a comment, no settings, nothing
+configured — but `create_new` does not read the file, and to the one guard that mattered the
+placeholder was a fully-configured machine. Anywhere "absent" is a meaningful state, writing a
+file to be helpful destroys the state that meant *ask me later*.
+
+---
+
+## B25 — `diagnose` started the daemon that then took the camera it was measuring {#b25}
+
+**Severity: high.** Not for what it damages — nothing — but because it made the one command a
+new user runs first fail every time, on a freshly installed machine, with a message that sent
+them looking for a process nobody had started.
+
+### What happened
+
+Phase 6 made the daemon socket-activated. `faciolockctl diagnose` had, since Phase 5, opened
+with a courtesy line:
+
+```rust
+match client::ask(&settings.socket, Op::Status, "root", Duration::from_secs(2)) {
+    Ok(_) => println!("daemon      answering"),
+```
+
+Before activation that `connect()` was inert: on a machine where no daemon was running it
+failed, printed the reason, and the camera stayed free. Afterwards the same call **starts the
+daemon**, and `Daemon::serve` opens the camera unconditionally on startup. Eleven lines later
+`diagnose` opened `/dev/video2` for its own 30-frame illumination probe and got `EBUSY`.
+
+The operator's journal is the whole bug in five lines:
+
+```text
+00:46:49  Started faciolock.service          <- the diagnose poke
+00:46:49  listening on /run/faciolock.sock (socket-activated)
+00:46:51  camera warm on .../video2          <- the daemon took the device
+          ...                                   diagnose then: "camera is in use by another process"
+00:47:19  idle for 30 s, exiting
+```
+
+Deterministic, and self-perpetuating: every retry re-triggered it. Two activations are in the
+journal, one per run, because the operator quite reasonably tried again.
+
+### The fix
+
+`diagnose` no longer connects at all. `daemon_line()` stats the socket path and reports what a
+`stat` can honestly support — there is a socket, or there is not.
+
+The line that was lost was worth less than it looked. **Under socket activation "daemon
+answering" is close to a tautology**: connecting is what makes it true. What a connect could
+still tell you — whether the daemon would *start cleanly* — is real, but it cannot be had
+without starting it, and `systemctl status` and the journal already answer it for free.
+
+The property is now held by a test that binds a real listener and `poll`s it afterwards to
+assert nothing ever arrived.
+
+### The lesson
+
+**Phase 6 changed what `connect()` means, and nothing audited the callers.** Socket activation
+converts a read-only probe into a service start, silently, everywhere in the codebase at once.
+The daemon's own code was reviewed carefully for it — `serve::inherited` refuses a malformed
+activation, the socket is not unlinked when systemd owns it — and the *clients* were not
+reviewed at all.
+
+The general form: when a primitive gains a side effect, the change is not where the primitive
+is defined, it is at every call site. Grep for the call sites.
 
 ---
 

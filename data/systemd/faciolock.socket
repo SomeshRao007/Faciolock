@@ -1,0 +1,30 @@
+# The socket exists at boot; the daemon does not.
+#
+# This is wiki/04's "zero RSS when idle" in three lines: systemd owns the listening inode,
+# the first connect() starts faciolockd, and after `idle_timeout_secs` with nothing
+# connecting the daemon exits and leaves this behind. Nothing is lost by the exit — the
+# template store, the failure budget and the audit log are all on disk.
+#
+# `ListenSequentialPacket`, not `ListenStream`. wiki/04 specifies SOCK_SEQPACKET so message
+# boundaries come from the kernel and faciolock-ipc has no framing to get wrong. Getting this
+# line wrong hands the daemon a working SOCK_STREAM listener that mis-parses every request,
+# so `serve::conforms` refuses to start on it rather than letting it be found at a lock
+# screen.
+
+[Unit]
+Description=Faciolock face authentication socket
+Documentation=file:///usr/share/doc/faciolock/04-architecture.md
+
+[Socket]
+ListenSequentialPacket=/run/faciolock.sock
+SocketUser=root
+SocketGroup=root
+# wiki/03 R2: only root may ask. The daemon checks SO_PEERCRED as well, because this line is
+# one edit away from being wrong and the kernel's answer is not.
+SocketMode=0600
+# One fd, handed whole to one long-lived process. Accept=yes would fork per connection,
+# which is a camera per connection.
+Accept=no
+
+[Install]
+WantedBy=sockets.target

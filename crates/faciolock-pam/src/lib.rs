@@ -1,26 +1,3 @@
-//! `pam_faciolock.so` — the root-privileged half of Faciolock, which is deliberately the
-//! half that does nothing.
-//!
-//! It reads a username, refuses remote sessions, sends one datagram to
-//! [`faciolockd`](../faciolock_daemon/index.html) and turns one datagram back into a PAM
-//! return code. No camera, no image decoding, no inference, no config file, no template
-//! store — wiki/03's non-negotiable #1, enforced by this crate having nothing in it to do
-//! any of that with.
-//!
-//! ## The rules this file exists to hold
-//!
-//! - **One `PAM_SUCCESS` construction site**, in [`code_for`], reached only from
-//!   `Verdict::Allow`. Every other path — every error, every unknown byte, every panic —
-//!   is a failure code, and under `auth sufficient` every failure code means the user types
-//!   their password (wiki/04's failure table).
-//! - **`catch_unwind` at the boundary.** Unwinding across an `extern "C"` frame is
-//!   undefined behaviour, and the caller is `sudo`. `panic = "abort"` is the wrong fix here
-//!   and must never be set on this crate: it would turn a bug in the module into a killed
-//!   `sudo` rather than a password prompt.
-//! - **No global state.** KDE runs the password and biometric stacks concurrently on
-//!   purpose, so the module must be reentrant; holding nothing is the cheapest way to be.
-//! - **No environment-derived socket path.** See [`options`].
-
 mod client;
 mod pam;
 
@@ -33,43 +10,15 @@ use std::time::Duration;
 
 use faciolock_ipc::{Op, Request, Verdict};
 
-/// wiki/04's data layout. Overridable only from the pam.d line — see [`options`].
 const DEFAULT_SOCKET: &str = "/run/faciolock.sock";
 
-/// What the module is willing to wait for, and therefore the worst stall a wedged daemon
-/// can add to a lock screen before the password prompt appears (decision P3-c).
-///
-/// The daemon's own hard cap is a 1500 ms capture deadline plus ~350 ms of inference, so
-/// 3 s is that worst case with margin, and nothing about it is a target: the warm path is
-/// measured at ~673 ms (wiki/06). Shorter would start cutting off honest slow answers;
-/// longer would be a user staring at a frozen screen.
 const DEADLINE: Duration = Duration::from_millis(3_000);
 
-/// The timeout the daemon is *asked* for. It applies its own regardless (wiki/04), so this
-/// is a hint, set below [`DEADLINE`] so the daemon gives up first and we hear about it.
 const REQUEST_TIMEOUT_MS: u16 = 2_000;
 
-/// [`Op::Clear`] touches no camera and no models — it is a hash-map removal and a small
-/// file rewrite — so it gets a fraction of [`DEADLINE`].
-///
-/// The number that matters is what it costs when the daemon is *absent*, because that is
-/// the common case on a machine where face unlock was never set up: `connect` to a missing
-/// socket fails immediately, so a normal password login pays nothing.
-///
-/// The pathological case is a daemon that accepted and then wedged, and there the cost is
-/// **900 ms, not 300** — [`client::ask`] bounds connect, write and read *each* by the
-/// deadline rather than the exchange as a whole (P3-c). Worth stating because it is added to
-/// a login that has already succeeded, so the user is watching a session that should already
-/// be open. Under a second is a stall; three seconds, which is what reusing [`DEADLINE`]
-/// here would have cost, is a bug report.
 const CLEAR_DEADLINE: Duration = Duration::from_millis(300);
 const CLEAR_TIMEOUT_MS: u16 = 200;
 
-/// PAM's authentication entry point.
-///
-/// # Safety
-/// Called by libpam with a live handle and its own `argv`. Nothing here dereferences either
-/// beyond the length libpam states.
 #[unsafe(no_mangle)]
 pub extern "C" fn pam_sm_authenticate(
     pamh: *mut pam::Handle,
@@ -77,20 +26,9 @@ pub extern "C" fn pam_sm_authenticate(
     argc: c_int,
     argv: *const *const c_char,
 ) -> c_int {
-    // The whole point of this wrapper: a panic anywhere below becomes a password prompt
-    // rather than undefined behaviour inside `sudo`.
     catch_unwind(AssertUnwindSafe(|| authenticate(pamh, argc, argv))).unwrap_or(pam::AUTH_ERR)
 }
 
-/// Required by libpam even though face authentication establishes no credentials.
-///
-/// A missing `pam_sm_setcred` makes the whole module unloadable, so this is not optional;
-/// wiki/03 says it can simply succeed, and there is nothing here that could fail.
-///
-/// **Not the lockout-clear signal.** It was the obvious candidate and it lost to
-/// `pam_sm_acct_mgmt` on coverage: `pam_setcred` is called by `sudo`, `su` and `login`, but
-/// screen lockers are inconsistent about it, and the lock screen is exactly where a user
-/// who has just been locked out is standing (decision P4-b).
 #[unsafe(no_mangle)]
 pub extern "C" fn pam_sm_setcred(
     _pamh: *mut pam::Handle,
@@ -101,25 +39,6 @@ pub extern "C" fn pam_sm_setcred(
     pam::SUCCESS
 }
 
-/// The lockout release (wiki/03 R5, decision P4-b).
-///
-/// PAM runs the account stack after authentication has succeeded, so reaching this function
-/// *is* the signal: somebody proved who they were, by password or by face or by whatever
-/// else the stack accepted. The module tells the daemon to forget that user's failures and
-/// then gets out of the way.
-///
-/// # This function returns `PAM_IGNORE` on every path, and that is not laziness
-///
-/// A module in the **account** stack that can return a failure can lock a user out of their
-/// own machine — not fall through to a password prompt, as a failure in the *auth* stack
-/// does, but refuse the login outright. Faciolock has no opinion about whether an account is
-/// valid, expired or permitted; it is using this callback purely as a notification. So there
-/// is no code path here that examines the daemon's reply, and none that can produce anything
-/// but `PAM_IGNORE`: not a dead daemon, not a refused socket, not a malformed reply, not a
-/// panic. The `unwrap_or` below is the same constant as the success path on purpose.
-///
-/// That also makes this the one entry point where the failure table in wiki/04 does not
-/// apply, because there is nothing to fail *into*.
 #[unsafe(no_mangle)]
 pub extern "C" fn pam_sm_acct_mgmt(
     pamh: *mut pam::Handle,
@@ -127,23 +46,15 @@ pub extern "C" fn pam_sm_acct_mgmt(
     argc: c_int,
     argv: *const *const c_char,
 ) -> c_int {
-    // The result is discarded deliberately, and this is the one place in the crate where
-    // that is right: a panic below is a bug worth not propagating into `sudo`, and it is
-    // also not grounds for this function to answer anything different.
     let _panicked = catch_unwind(AssertUnwindSafe(|| clear_lockout(pamh, argc, argv)));
     pam::IGNORE
 }
 
-/// Best-effort notification. Every early return is a case where there is nothing useful to
-/// say to the daemon, and none of them changes what the caller gets back.
 fn clear_lockout(pamh: *mut pam::Handle, argc: c_int, argv: *const *const c_char) {
     let opts = unsafe { options(argc, argv) };
     let Some(handle) = (unsafe { pamh.as_mut() }) else {
         return;
     };
-    // A remote session never consumed a slot in the failure budget, so it has none to
-    // release. Skipping the IPC here is the same reasoning as in `authenticate` and keeps
-    // the promise that an SSH login touches the daemon not at all (wiki/03 R4).
     if remote_session(handle).is_some() {
         return;
     }
@@ -167,9 +78,6 @@ fn authenticate(pamh: *mut pam::Handle, argc: c_int, argv: *const *const c_char)
         return pam::AUTH_ERR;
     };
 
-    // **Before any IPC**, wiki/03 R4. A `sudo` over SSH has no camera at the far end, and
-    // asking the daemon would light up an emitter in an empty room and burn a rate-limiter
-    // slot on somebody who was never going to be looked at.
     if let Some(reason) = remote_session(handle) {
         if opts.debug {
             pam::debug(&format!("faciolock: refusing a remote session ({reason})"));
@@ -180,8 +88,6 @@ fn authenticate(pamh: *mut pam::Handle, argc: c_int, argv: *const *const c_char)
     let Some(user) = handle.user() else {
         return pam::AUTH_ERR;
     };
-    // The charset and length rules live in the wire type, so a username that could never
-    // travel is refused here rather than being trimmed into one that could.
     let Ok(request) = Request::new(Op::Auth, user, REQUEST_TIMEOUT_MS) else {
         return pam::AUTH_ERR;
     };
@@ -197,30 +103,16 @@ fn authenticate(pamh: *mut pam::Handle, argc: c_int, argv: *const *const c_char)
     }
 }
 
-/// The only place in this crate that can produce `PAM_SUCCESS`.
-///
-/// Exhaustive rather than a lookup or an `is_allow` test, so a verdict added to the
-/// protocol later fails to compile instead of falling into whichever arm it happens to
-/// resemble. `RateLimited` deliberately returns the same code as `Deny`: telling the caller
-/// which of the two it was is telling an attacker whether to keep going.
 fn code_for(verdict: Verdict) -> c_int {
     match verdict {
         Verdict::Allow => pam::SUCCESS,
         Verdict::Deny | Verdict::RateLimited => pam::AUTH_ERR,
         Verdict::NoEnrolment => pam::USER_UNKNOWN,
         Verdict::Unavailable => pam::AUTHINFO_UNAVAIL,
-        // `Ack` answers `Op::Clear` and can only arrive here if a daemon sent it in reply
-        // to an `Op::Auth`, which is a daemon that is broken or not ours. Either way it is
-        // not an authentication, and every non-`Allow` code means a password prompt.
         Verdict::Ack => pam::AUTH_ERR,
     }
 }
 
-/// Why this authentication is not happening in front of the camera, if it is not.
-///
-/// `PAM_RHOST` is the authoritative signal and the SSH variables are the belt: `sudo` under
-/// an SSH session inherits them, and a `sudo` stack that never set `PAM_RHOST` would
-/// otherwise look local. Cheap enough to do all four.
 fn remote_session(handle: &pam::Handle) -> Option<&'static str> {
     if handle.rhost().is_some_and(|h| !h.is_empty()) {
         return Some("PAM_RHOST");
@@ -228,8 +120,6 @@ fn remote_session(handle: &pam::Handle) -> Option<&'static str> {
     remote_from_environment()
 }
 
-/// Split out from [`remote_session`] because it is the half a test can reach without a live
-/// `pam_handle_t`, and it is the half with a list in it that could lose an entry.
 fn remote_from_environment() -> Option<&'static str> {
     ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
         .into_iter()
@@ -241,22 +131,6 @@ struct Options<'a> {
     debug: bool,
 }
 
-/// Module arguments from the pam.d line.
-///
-/// **`socket=` is readable from here and from nowhere else — never from the environment.**
-/// This code runs as root inside a process whose environment an unprivileged caller
-/// influences; a socket path taken from `$FACIOLOCK_SOCKET` would let that caller point the
-/// module at a daemon they wrote, which answers `Allow`. That is not a configuration bug,
-/// it is a root shell. A pam.d file is root-owned, which is the whole reason the knob is
-/// safe there (decision P3-a).
-///
-/// Unknown arguments are ignored rather than fatal: PAM has no way to report a
-/// configuration error except by failing the authentication, and failing every
-/// authentication over a typo is worse than ignoring it.
-///
-/// # Safety
-/// `argv` points at `argc` NUL-terminated strings that outlive the call, per the PAM module
-/// interface.
 unsafe fn options<'a>(argc: c_int, argv: *const *const c_char) -> Options<'a> {
     let mut opts = Options { socket: Path::new(DEFAULT_SOCKET), debug: false };
     if argv.is_null() || argc <= 0 {
@@ -283,7 +157,6 @@ unsafe fn options<'a>(argc: c_int, argv: *const *const c_char) -> Options<'a> {
 mod tests {
     use super::*;
 
-    /// wiki/09's single-construction-site rule, as an assertion rather than a comment.
     #[test]
     fn allow_is_the_only_verdict_that_authenticates() {
         assert_eq!(code_for(Verdict::Allow), pam::SUCCESS);
@@ -298,8 +171,6 @@ mod tests {
         }
     }
 
-    /// The map and `Verdict::is_allow` are two statements of the same rule and must not be
-    /// able to drift apart — one of them is what the daemon uses.
     #[test]
     fn the_code_map_agrees_with_the_protocols_own_notion_of_success() {
         for verdict in [
@@ -318,29 +189,18 @@ mod tests {
         }
     }
 
-    /// **The account stack's whole safety property.** `pam_sm_acct_mgmt` must return
-    /// `PAM_IGNORE` no matter what the daemon does, because anything else in the account
-    /// stack can refuse a login outright rather than fall through to a password prompt.
-    ///
-    /// Driven against real sockets rather than a mock: an absent daemon, a socket that
-    /// accepts and says nothing, one that answers garbage, and one that hangs up mid-reply.
-    /// A null handle covers the fourth path, where there is no user to ask about.
     #[test]
     fn account_management_ignores_everything_including_a_hostile_daemon() {
         let dir = std::env::temp_dir().join("faciolock-acct-mgmt");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
 
-        // No handle: the early return, and the one case reachable without a live libpam.
         assert_eq!(
             pam_sm_acct_mgmt(std::ptr::null_mut(), 0, 0, std::ptr::null()),
             pam::IGNORE,
             "a null handle must still be ignored"
         );
 
-        // And the transport half, through the same client the entry point uses. If any of
-        // these produced something other than an error the entry point would still return
-        // IGNORE, but this is what proves there is nothing for it to trip over.
         let request = Request::new(Op::Clear, "csr", CLEAR_TIMEOUT_MS).expect("valid");
         let missing = dir.join("absent.sock");
         assert!(
@@ -349,8 +209,6 @@ mod tests {
         );
     }
 
-    /// wiki/03's table, spelled out. These are the codes that decide whether the user gets
-    /// a password prompt or a lockout, and they are ABI.
     #[test]
     fn the_failure_codes_are_the_ones_wiki_03_specifies() {
         assert_eq!(code_for(Verdict::Deny), 7, "PAM_AUTH_ERR");
@@ -375,28 +233,17 @@ mod tests {
             parse(&["socket=/run/user/1000/t.sock", "debug"]),
             ("/run/user/1000/t.sock".into(), true)
         );
-        // A typo must not fail every authentication on the machine, and must not silently
-        // become an empty path either.
         assert_eq!(parse(&["sockett=/x", "socket="]), (DEFAULT_SOCKET.into(), false));
     }
 
-    /// A null `argv` is legal when `argc` is 0 and must not be dereferenced.
     #[test]
     fn no_arguments_at_all_is_not_a_dereference() {
         let opts = unsafe { options(0, std::ptr::null()) };
         assert_eq!(opts.socket, Path::new(DEFAULT_SOCKET));
     }
 
-    /// Two properties in one test because both need the environment, and mutating it from
-    /// two tests that `cargo` may run concurrently is a race.
-    ///
-    /// 1. Each SSH variable is enough on its own to refuse — this is wiki/03 R4, and the
-    ///    list is the kind of thing that loses an entry in a refactor.
-    /// 2. The environment cannot move the socket. If that assertion ever fails, somebody
-    ///    has given an unprivileged caller a say in which daemon a root process trusts.
     #[test]
     fn ssh_variables_refuse_and_the_environment_never_chooses_the_daemon() {
-        // Skip if this session is genuinely remote rather than pretend the fixture works.
         if remote_from_environment().is_some() {
             eprintln!("running under SSH; the negative half of this test is not meaningful");
             return;
@@ -404,7 +251,6 @@ mod tests {
         for key in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"] {
             unsafe { std::env::set_var(key, "10.0.0.1 51000 10.0.0.2 22") };
             assert_eq!(remote_from_environment(), Some(key), "{key} must refuse on its own");
-            // Set but empty is not a remote session: some shells export the name alone.
             unsafe { std::env::set_var(key, "") };
             assert_eq!(remote_from_environment(), None, "an empty {key} is not a session");
             unsafe { std::env::remove_var(key) };

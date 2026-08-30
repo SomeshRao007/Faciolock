@@ -1,30 +1,8 @@
-//! Similarity-transform alignment of a detected face to the canonical 112x112 chip.
-//!
-//! Twenty lines of arithmetic that decide whether the whole system works. The transform
-//! **must be bit-identical between enrolment and verification**, or the embeddings drift
-//! apart and accuracy collapses quietly — no error, no log line, just a rising false
-//! reject rate. wiki/05 calls this "the classic bug in every reimplementation of this
-//! pipeline", which is why it gets a golden-output regression test rather than a review.
-//!
-//! Determinism is also why there is no linear-algebra dependency here. The 2D similarity
-//! transform has a closed form; reaching for a crate's SVD would make the frozen goldens
-//! hostage to that crate's numerics across versions, which is the opposite of what the
-//! goldens are for.
-
 use crate::detect::LANDMARKS;
 use crate::frame::Frame;
 
-/// Side of the aligned chip. SFace's input, and ArcFace's convention.
 pub const CHIP_SIZE: usize = 112;
 
-/// The canonical ArcFace five-point reference, in 112x112 chip coordinates.
-///
-/// Right eye, left eye, nose tip, right mouth corner, left mouth corner — the same order
-/// YuNet emits, which is the whole reason one model covers detection and alignment both.
-///
-/// These exact constants are the de-facto standard the embedder was trained against.
-/// Changing them is not a tuning knob: it silently moves every enrolled template into a
-/// different space from every verification.
 pub const REFERENCE_POINTS: [(f32, f32); LANDMARKS] = [
     (38.2946, 51.6963),
     (73.5318, 51.5014),
@@ -33,12 +11,6 @@ pub const REFERENCE_POINTS: [(f32, f32); LANDMARKS] = [
     (70.7299, 92.2041),
 ];
 
-/// A 2D similarity transform: uniform scale, rotation, translation. No shear, no
-/// reflection.
-///
-/// Stored as the four numbers that actually vary. `a` and `b` are `scale*cos` and
-/// `scale*sin`, so the linear part is `[[a, -b], [b, a]]` — a form in which "is this
-/// still a similarity transform" is true by construction rather than by assertion.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Similarity {
     pub a: f32,
@@ -52,7 +24,6 @@ impl Similarity {
         (self.a * x - self.b * y + self.tx, self.b * x + self.a * y + self.ty)
     }
 
-    /// The inverse, or `None` if the forward transform is degenerate.
     pub fn invert(&self) -> Option<Similarity> {
         let det = self.a * self.a + self.b * self.b;
         if det <= f32::EPSILON {
@@ -72,20 +43,6 @@ impl Similarity {
     }
 }
 
-/// Least-squares similarity transform mapping `src` onto `dst`.
-///
-/// This is Umeyama's estimator specialised to two dimensions with reflection disallowed,
-/// where it collapses to a closed form and no SVD is required:
-///
-/// ```text
-/// a = Σ(src·dst) / Σ|src|²        b = Σ(src×dst) / Σ|src|²
-/// ```
-///
-/// over mean-centred points. Reflection is disallowed on purpose — a mirrored fit would
-/// mean the landmarks came back mirrored, which is a detection failure to surface, not a
-/// pose to accommodate.
-///
-/// `None` when the source points are coincident and no scale can be recovered.
 pub fn estimate_similarity(
     src: &[(f32, f32); LANDMARKS],
     dst: &[(f32, f32); LANDMARKS],
@@ -118,7 +75,6 @@ pub fn estimate_similarity(
     Some(Similarity { a, b, tx: dcx - (a * scx - b * scy), ty: dcy - (b * scx + a * scy) })
 }
 
-/// A face resampled into the canonical chip the embedder expects.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Chip {
     pub pixels: Vec<u8>,
@@ -131,13 +87,6 @@ impl Chip {
     }
 }
 
-/// Warp a face onto the canonical chip using its five landmarks.
-///
-/// Inverse mapping with bilinear sampling: each destination pixel pulls from the source
-/// rather than each source pixel pushing to the destination, which is what avoids holes.
-/// Pixels whose source falls outside the frame are clamped to the nearest edge, not
-/// zeroed — a face at the edge of the frame should degrade, not acquire a hard black
-/// border that the embedder has never seen.
 pub fn align(frame: &Frame<'_>, landmarks: &[(f32, f32); LANDMARKS]) -> Option<Chip> {
     let forward = estimate_similarity(landmarks, &REFERENCE_POINTS)?;
     let inverse = forward.invert()?;
@@ -145,20 +94,6 @@ pub fn align(frame: &Frame<'_>, landmarks: &[(f32, f32); LANDMARKS]) -> Option<C
     let mut pixels = vec![0u8; CHIP_SIZE * CHIP_SIZE];
     for dy in 0..CHIP_SIZE {
         for dx in 0..CHIP_SIZE {
-            // **Integer pixel coordinates, no half-pixel offset** — `cv2.warpAffine`'s
-            // convention, and therefore ArcFace's, because the canonical chips every
-            // embedder of this family was trained on are produced by `warpAffine`.
-            //
-            // Note this is the *opposite* convention to `detect`'s letterbox, which does
-            // offset by half a pixel because `cv2.resize` does. Two OpenCV functions,
-            // two conventions; matching each one individually is what matters, not being
-            // internally uniform.
-            //
-            // The first version of this offset by half a pixel here too. At an inverse
-            // scale of ~1.42 that is a systematic ~0.21 px shift of every sampled point —
-            // invisible in any self-consistent test, and exactly the silent alignment
-            // drift wiki/05 warns about. It was caught by comparing against OpenCV's warp
-            // and by nothing else: the transform itself was already correct to 1e-4.
             let (sx, sy) = inverse.apply(dx as f32, dy as f32);
             pixels[dy * CHIP_SIZE + dx] = sample_bilinear(frame, sx, sy);
         }
@@ -190,8 +125,6 @@ mod tests {
     use super::*;
     use crate::testing::{domed, H, W};
 
-    /// The estimator recovers a transform it was given. Analytic, exact, and independent
-    /// of any reference implementation — if this fails the arithmetic is simply wrong.
     #[test]
     fn a_known_transform_is_recovered_exactly() {
         let angle = 0.37f32;
@@ -233,8 +166,6 @@ mod tests {
         assert!(Similarity { a: 0.0, b: 0.0, tx: 1.0, ty: 1.0 }.invert().is_none());
     }
 
-    /// Landmarks that already sit on the reference points must produce the identity, and
-    /// therefore a chip that is a plain crop of the top-left 112x112.
     #[test]
     fn reference_landmarks_produce_the_identity_transform() {
         let s = estimate_similarity(&REFERENCE_POINTS, &REFERENCE_POINTS).unwrap();
@@ -243,10 +174,6 @@ mod tests {
         assert!(s.tx.abs() < 1e-3 && s.ty.abs() < 1e-3);
     }
 
-    /// **The property the golden test exists to protect.** Alignment must be a pure
-    /// function: the same frame and the same landmarks must produce byte-identical chips,
-    /// because enrolment and verification are two separate calls and any difference
-    /// between them is silent embedding drift.
     #[test]
     fn alignment_is_deterministic() {
         let px = domed(W, H, 220, 10);
@@ -258,8 +185,6 @@ mod tests {
         assert_eq!(a.pixels.len(), CHIP_SIZE * CHIP_SIZE);
     }
 
-    /// Alignment must undo pose, which is its entire purpose. The same synthetic subject
-    /// presented at a different scale, rotation and offset must land in the same chip.
     #[test]
     fn alignment_cancels_scale_rotation_and_translation() {
         let px = domed(256, 256, 240, 5);
@@ -275,8 +200,6 @@ mod tests {
         let chip_a = align(&frame, &base).unwrap();
         let chip_b = align(&frame, &moved).unwrap();
 
-        // Not byte-identical — the two sample different pixels of a radial gradient — but
-        // the landmarks must land on the reference points either way, which is the claim.
         for (lm, chip) in [(base, &chip_a), (moved, &chip_b)] {
             let t = estimate_similarity(&lm, &REFERENCE_POINTS).unwrap();
             for (i, (rx, ry)) in REFERENCE_POINTS.iter().enumerate() {

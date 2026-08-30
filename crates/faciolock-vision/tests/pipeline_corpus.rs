@@ -1,18 +1,3 @@
-//! End-to-end: enrol on one recording, verify against the others.
-//!
-//! This is the Phase 1 exit criterion, and the first test of the assumption the whole
-//! project inherits without ever having checked it — **SFace is an RGB model reporting
-//! RGB numbers (99.40% LFW), and every frame we have is 8-bit near-infrared.** wiki/05
-//! lists "it underperforms on our own IR corpus" as unmeasured. Here it gets measured.
-//!
-//! What this can settle: cross-capture similarity for one subject across lighting, angle
-//! and glasses, which is the false-*reject* side. What it cannot settle: FAR, because the
-//! corpus has exactly one subject and an impostor comparison needs a second person. The
-//! cosine threshold therefore remains OpenCV's RGB-calibrated 0.363 — paper-derived and
-//! provisional, and it must not be described as anything else.
-//!
-//! Run with `-- --nocapture` for the numbers.
-
 mod common;
 
 use std::time::Instant;
@@ -87,9 +72,6 @@ fn enrol_on_one_capture_and_verify_against_the_rest() {
             Ok(b) => pipe.verify(&b, &template),
             Err(e) => {
                 eprintln!("{:<26} {:>10} — burst rejected: {e:?}", cap.label, "-");
-                // A live capture must form a burst *unless* the ambient gate fired, in
-                // which case this hardware could not measure it and refusing is the
-                // correct, honest outcome (B18). Anything else is a false reject.
                 assert!(
                     !cap.label.starts_with("live_")
                         || matches!(e, BurstError::AmbientTooBright { .. }),
@@ -122,10 +104,6 @@ fn enrol_on_one_capture_and_verify_against_the_rest() {
             }
         }
 
-        // The security-relevant half: nothing that is not a live face may be allowed.
-        // `spoof_` is included — a presentation attack must be denied whichever stage
-        // denies it. spoof_phone is currently caught by detection rather than by the
-        // response check; see wiki/11 B17 for why that distinction matters.
         if cap.label.starts_with("attack_")
             || cap.label.starts_with("null_")
             || cap.label.starts_with("spoof_")
@@ -148,11 +126,6 @@ fn enrol_on_one_capture_and_verify_against_the_rest() {
     assert!(live_total > 0, "no live captures to verify");
 }
 
-/// The cross-capture similarity matrix, which is what actually says whether an RGB-trained
-/// embedder survives contact with near-infrared.
-///
-/// Reports rather than asserts a threshold: with one subject every off-diagonal cell is a
-/// genuine pair, so the numbers bound FRR and say nothing whatever about FAR.
 #[test]
 fn cross_capture_similarity_matrix() {
     let Some((pipe, captures)) = pipeline() else { return };
@@ -209,8 +182,6 @@ fn cross_capture_similarity_matrix() {
     );
 }
 
-/// 2-of-2 against 2-of-3, on the corpus, since the choice was made on argument and the
-/// data is free once the embeddings exist.
 #[test]
 fn false_reject_rate_for_each_aggregation_rule() {
     let Some((pipe, captures)) = pipeline() else { return };
@@ -259,19 +230,6 @@ fn false_reject_rate_for_each_aggregation_rule() {
     let _ = embed::SFACE_DIMS;
 }
 
-/// Does the landmark error at a small detector input actually cost anything?
-///
-/// `detect_corpus` measured the *displacement*: 5-12 px at 192x192 against a 448x448
-/// reference, 1.8-6.2 px at 320. A displacement is not yet a cost. This converts it into
-/// the only currency that matters — how far the embedding moves — by two routes:
-///
-/// 1. Embed the same frame twice, once from the 192 landmarks and once from the 448 ones.
-///    The cosine between those two embeddings is the price of running the detector small.
-/// 2. Perturb the landmarks by a known number of pixels and watch the embedding drift.
-///    That gives the shape of the curve, so the number from (1) can be read against it.
-///
-/// If (1) sits far above the 0.363 threshold and near the flat part of (2), 192 is fine
-/// and the 22 ms that 320 costs buys nothing.
 #[test]
 fn embedding_sensitivity_to_landmark_error() {
     let Some((_pipe, captures)) = pipeline() else { return };
@@ -300,7 +258,6 @@ fn embedding_sensitivity_to_landmark_error() {
     let mut worst_scale_cost = 1.0f64;
 
     for cap in &live {
-        // Brightest frame past AGC settle, i.e. an emitter-ON frame.
         let idx = (5..20.min(cap.frame_count()))
             .max_by(|&a, &b| {
                 let m = |i: usize| {
@@ -350,8 +307,6 @@ fn embedding_sensitivity_to_landmark_error() {
         let Ok(base) = sface.embed(&base_chip) else { continue };
 
         for px in [0.5f32, 1.0, 2.0, 4.0, 8.0] {
-            // Deterministic pseudo-random directions: a fixed LCG, so the number is
-            // reproducible run to run. No rand dependency, and no hidden seed.
             let mut seed = 0x2545_F491u32;
             let mut moved = d;
             for i in 0..LANDMARKS {
@@ -373,11 +328,6 @@ fn embedding_sensitivity_to_landmark_error() {
     );
 }
 
-/// Per-stage warm-path latency, measured rather than budgeted.
-///
-/// wiki/06's table has carried estimates for everything except the two inference figures.
-/// This measures the stages this crate owns; the frame burst belongs to Phase 2 and is
-/// still the weakest number in that table.
 #[test]
 fn warm_path_stage_latency() {
     let Some((pipe, captures)) = pipeline() else { return };
@@ -398,17 +348,6 @@ fn warm_path_stage_latency() {
         .unwrap_or(0);
     let frame = Frame::new(cap.frame(idx), cap.width, cap.height).unwrap();
 
-    // 50 measured iterations after 10 warm-up, and the *median* is what is reported.
-    //
-    // An earlier version of this test used 12 iterations with no warm-up and reported
-    // SFace at 39 ms against the 85 ms in wiki/08. The spike binary, re-run on this
-    // machine in the same session, reads `min 38.98 / p50 76.19 / p95 76.68` — bimodal,
-    // because the CPU boosts for the first handful of inferences and then settles. A
-    // 12-sample median lands inside the boost window and reports a number no real
-    // authentication will ever see. **A benchmark that does not outlast the boost clock
-    // is measuring the clock, not the code** — the same shape of error as
-    // [B11](../../../../wiki/11-bug-log.md), where a figure was trusted because it was
-    // convenient rather than because it was controlled.
     const WARMUP: usize = 10;
     const N: usize = 50;
     let p50 = |mut v: Vec<f64>| {
@@ -416,7 +355,6 @@ fn warm_path_stage_latency() {
         v[v.len() / 2]
     };
 
-    // Burst construction over a realistic 3-pair capture, not the 42-pair recording.
     let stride = cap.width * cap.height;
     let short = &cap.bytes[..stride * 11];
     for _ in 0..WARMUP {

@@ -1,21 +1,5 @@
-//! Model benchmark under `tract`.
-//!
-//! Built for the S1 spike that resolved Q2. That question is settled -- `tract`, see
-//! wiki/08 -- and the `ort` half has been removed along with its dependency. What
-//! remains is useful past Phase 0: any model considered for this pipeline gets its
-//! load time and p50/p95/p99 measured here before it goes in the budget.
-//!
-//! Two things this tool exists to stop us repeating (wiki/11 B11):
-//!   * a latency figure without an input size means nothing -- the input size is
-//!     printed on every run;
-//!   * a published benchmark from another machine is not a comparison. Measure here.
-//!
-//! Usage:  runtime <model.onnx> [width] [height]
-
 use std::time::{Duration, Instant};
 
-/// Inferences per measurement, after warm-up. Enough for a stable p95 without making
-/// the spike take minutes on the slower runtime.
 const ITERS: usize = 50;
 const WARMUP: usize = 5;
 
@@ -34,8 +18,6 @@ fn main() {
     println!("size  : {:.1} KB", size as f64 / 1024.0);
     println!("input : 1x3x{h}x{w} f32 (NCHW)\n");
 
-    // Mid-grey rather than zeros: an all-zero input can hit degenerate fast paths in
-    // some kernels, which would flatter the result.
     let input: Vec<f32> = (0..3 * h * w).map(|i| ((i % 255) as f32) / 255.0).collect();
 
     report("tract", bench_tract(&path, &input, w, h));
@@ -52,8 +34,6 @@ fn report(name: &str, r: Result<Bench, String>) {
     match r {
         Err(e) => {
             println!("  LOAD FAILED");
-            // The error text is the deliverable when a model will not load: it names
-            // the unsupported operator, which is what makes the failure actionable.
             for line in e.lines().take(14) {
                 println!("    {line}");
             }
@@ -74,8 +54,6 @@ fn report(name: &str, r: Result<Bench, String>) {
     }
     println!();
 }
-
-// ---------------------------------------------------------------------------
 
 fn bench_tract(path: &str, input: &[f32], w: usize, h: usize) -> Result<Bench, String> {
     use tract_onnx::prelude::*;

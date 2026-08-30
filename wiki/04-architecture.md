@@ -55,13 +55,58 @@ Cost of the daemon: a resident process. Which we avoid — see below.
    shared and demand-loaded), opens the camera, answers.
 3. After `idle_timeout` (default ~30 s) with no requests, the daemon exits. The
    socket unit stays; the next connect re-activates.
-4. **Pre-warm**: a tiny user-session agent subscribes to the compositor's
-   idle/lock signals and pokes the socket ~200 ms *before* the lock screen appears,
-   so the camera is already streaming when PAM asks. This is where the "instant"
-   feel comes from — it hides V4L2 warm-up, which is the real latency, not inference.
+4. ~~**Pre-warm**: a tiny user-session agent subscribes to the compositor's
+   idle/lock signals and pokes the socket ~200 ms *before* the lock screen appears.~~
+   **Deferred, and the design above does not work.** See below.
 
-The pre-warm agent is a convenience, not a dependency: without it everything still
-works, just with the camera warm-up on the critical path.
+Steps 1–3 are built (Phase 6). [`data/systemd/faciolock.socket`](../data/systemd/faciolock.socket)
+is the socket unit; `serve::inherited` is `sd_listen_fds` hand-rolled against the three
+environment variables and a `getsockopt`, for the same reason [`audit`](03-pam-and-security.md#r9--audit-every-attempt)
+writes its own priority prefixes — no `libsystemd` in the process that parses V4L2 buffers.
+`idle_timeout_secs` (default 30) is honoured **only when the socket was inherited**: a
+self-bound daemon that exits on a timer has nothing to reactivate it, which is not an
+idle-exit but a crash on a schedule.
+
+Two properties that had to be built rather than configured:
+
+- **The daemon must not unlink the socket path when the fd came from systemd.** systemd keeps
+  its own fd bound to that inode across every activation. Unlinking on exit would mean the
+  *first* idle-exit permanently broke reactivation — a daemon that works until it works.
+- **An enrolment in flight blocks the exit.** `ENROL_EXPIRY` is 60 s against a default idle
+  of 30, so somebody fetching their glasses between poses is the ordinary case. A `Pending`
+  lives in the process's memory and nowhere else.
+
+### The pre-warm agent does not work as specified, and it is deferred (P6-a)
+
+Two problems, and the second is fatal to the design rather than to the implementation.
+
+**It cannot reach the socket.** The socket is 0600 root:root by
+[R2](03-pam-and-security.md#r2--the-daemon-decides-who-you-are-the-pam-module-states-who-you-claim-to-be).
+A user-session agent's `connect()` returns `EACCES` before the kernel queues anything, so
+nothing activates and nothing warms. That much is fixable — a second, laxer socket that the
+daemon accepts and closes — at the price of letting anyone in group `video` start the daemon
+and light the IR emitter at will.
+
+**It pokes at the wrong end of the absence.** The plan warmed on the *lock* signal. You lock
+the screen when you leave; the daemon idle-exits 30 s later; you return five minutes after
+that. The warm expired before it was needed. The moment worth warming is "a person just came
+back" — and on KDE the greeter takes the input that signals it and then calls PAM itself,
+with nothing observable in between. There is no signal a session agent can subscribe to that
+arrives early enough to help.
+
+So what the agent was meant to hide stays visible, and it is worth naming:
+
+| Cold unlock, socket-activated | Cost |
+|---|---|
+| exec → socket answering (model load + SHA256 of 39 MB) | 377 ms |
+| camera open + AGC settle frames | ~400 ms |
+| the 6-frame burst | ~340–410 ms |
+| detect + embed + match | ~350 ms |
+| | **~1.5 s**, against the PAM module's 3 s deadline |
+
+Warm, only the last two rows are paid: **~750 ms**. `idle_timeout_secs` is therefore the real
+lever and the only honest one — it trades that ~800 ms against a resident process holding a
+camera. It is config, and the number is an operator's to choose.
 
 ## IPC: what and why
 

@@ -467,14 +467,79 @@ takes a separate approval.
 
 ## Phase 6 — Integration & hardening (week 7)
 
-- systemd `.socket` + `.service`, socket activation, idle-exit
-- Full sandbox profile — target `systemd-analyze security` ≤ 2.0
-- Pre-warm session agent on the compositor's idle/lock signal
-- All six PAM services: `sudo`, `su`, `kde`, `sddm`, `polkit-1`, `login`
-- `cargo-fuzz` on the IPC parser and the frame-handling path
+**Started 2026-08-29.** Two decisions taken with the operator before any code, and both go
+against the plan as it was written above.
+
+- ~~systemd `.socket` + `.service`, socket activation, idle-exit~~ — **done**.
+  `serve::inherited` is `sd_listen_fds` hand-rolled, no `libsystemd`; idle-exit is a `poll`
+  timeout honoured only when the socket was inherited
+- ~~Full sandbox profile — target `systemd-analyze security` ≤ 2.0~~ — **done, reads 0.6**
+  ([03 R7](03-pam-and-security.md#as-shipped--measured-2026-08-29))
+- ~~Pre-warm session agent on the compositor's idle/lock signal~~ — **deferred (P6-a)**, and
+  not for cost. The design does not work: see below
+- All six PAM services — **shipped as one `pam-auth-update` profile, not six files** (P6-b);
+  the rollout and its recovery path are in [07](07-desktop-and-packaging.md#rolling-it-out-and-getting-back-out)
+- ~~`cargo-fuzz` on the IPC parser and the frame-handling path~~ — **targets written**, plus
+  a stable-toolchain half that actually runs here
+
+### The pre-warm agent was specified against a signal that does not exist (P6-a)
+
+Two problems. The first is fixable and the second is not.
+
+It cannot reach the socket — 0600 root:root, so a user-session agent's `connect()` is `EACCES`
+before anything is queued. And it pokes at the wrong end of the absence: the plan warmed on
+the **lock** signal, but you lock the screen when you *leave* and the daemon idle-exits 30 s
+later, so the warm has expired long before you come back. The moment worth warming is "a
+person just returned", and on KDE the greeter takes the input that signals it and then calls
+PAM itself with nothing observable in between.
+
+What the agent was meant to hide is **~800 ms** — 377 ms of model load plus ~400 ms of camera
+warm — and it stays visible. `idle_timeout_secs` is the only honest lever and it is now
+config. [04](04-architecture.md#the-pre-warm-agent-does-not-work-as-specified-and-it-is-deferred-p6-a)
+carries the breakdown.
+
+### `cargo-fuzz` needs nightly, and this machine does not have it
+
+The `fuzz/` crate is written and excluded from the workspace — `libfuzzer-sys` must never
+enter the lockfile that `faciolock-pam`'s dependency-tree assertion rests on, which is the
+same reasoning that keeps `spikes/` out and one degree sharper, since the crate it fuzzes
+hardest is the response parser inside `pam_faciolock.so`.
+
+But the reference machine runs the distribution's stable Rust, so those targets have never
+executed. A fuzz target nobody can run is a phase item that reads as done and has run zero
+times, so the same properties are also asserted by seeded generators in `cargo test`:
+`faciolock-ipc/tests/hostile_bytes.rs` and `faciolock-vision/tests/hostile_frames.rs`. What
+they give up is the coverage-guided search; what they keep is the property.
+
+**Both of them failed their own first run, and both failures were the generator rather than
+the parser.** The response test asserts a floor on how many inputs the decoder actually
+accepted, and purely random bytes reached it 21 times in 200,000 — a version byte is 1 in 256
+before a legal verdict code is 1 in 43. The frame test asserts a floor on how many corrupted
+bursts still paired, and a uniformly random truncation landed on a frame boundary 1 byte in
+64. Without those two assertions both tests would have passed convincingly while testing the
+early returns. Mutation from valid inputs fixed both.
 
 **Exit:** zero RSS when idle (`pidof faciolockd` empty). KDE lock screen unlocks by
 face *and* password entry still works instantly while the camera is running.
+
+**Status: the first half is met, the second is not started.**
+
+| Leg | State |
+|---|---|
+| 195 tests across the workspace, no camera attached | **observed**, `cargo test --workspace`, 0 failed — 189 before this phase |
+| The fuzz crate did not leak into the PAM module's tree | **observed** — `cargo tree -p faciolock-pam` still reads exactly `libc` + `faciolock-ipc` |
+| A `SOCK_STREAM` listener is refused rather than accepted quietly | **observed**, unit test. One word in a unit file (`ListenStream=` for `ListenSequentialPacket=`) produces a daemon that starts, logs "socket-activated" and mis-parses every request |
+| An idle daemon exits and leaves no process behind | **observed 2026-08-29**, `systemd-socket-activate` against the shipped binary: `socket-activated`, `camera warm … 6 frames in 339 ms`, `idle for 3 s, exiting`, `pgrep -x faciolockd` empty |
+| The socket outlives the exit | **observed**, same run. This is the bug that would have made the *first* idle-exit permanently break reactivation |
+| **Reactivation on the same inode** | **observed 2026-08-30**, under real systemd after `install-local.sh`, and it took the install to show it. Two idle-exits, two reactivations on the same inode, from the journal: `idle for 30 s, exiting` → `Deactivated successfully` → `Started faciolock.service` → `camera warm … 6 frames in 339 ms`, twice inside two minutes. `systemd-socket-activate` could not show this: it `exec()`s the daemon rather than supervising it — measured, the activator's pid *is* the daemon's pid — so when the daemon exits nothing holds the listening fd and the next request gets `ECONNREFUSED`. `tools/activation-try.sh` PART 4 starts a fresh activator instead, which shows an exited daemon is replaceable and not that systemd replaces it |
+| `systemd-analyze security` ≤ 2.0 | **observed — 0.6**, offline against the unit file |
+| The sandbox runs the real workload, not just the scorer | **observed 2026-08-30**, same journal. `User=faciolock` under the full profile opened `/dev/video2` through `SupplementaryGroups=video` + `DeviceAllow=char-video4linux`, read and SHA256-verified both models out of `/usr/share/faciolock/models` under `ProtectSystem=strict`, and warmed in **335–339 ms** — unchanged from the unsandboxed daemon since Phase 2. Peak RSS 106.4 MB, 449 ms CPU over a 45 s life. A 0.6 score on a service that cannot do its job would have been worth nothing |
+| `faciolockctl diagnose` against the installed system | **observed 2026-08-30**, and only after it found two bugs of its own — [B25](11-bug-log.md#b25) and [B26](11-bug-log.md#b26), both introduced by this phase, both hit by the operator running this one command on a fresh install. Now: names `/dev/video2`, rejects the RGB node and both metadata nodes, reads **alternation 1.00 at 44.8:1**, and writes `device` + `tier` into `/etc/faciolock/faciolockd.toml` |
+| An enrolment in flight blocks the idle-exit | **observed**, unit test (`may_exit`). The wiring — that `serve::run` consults it — is `tools/activation-try.sh` PART 5 and needs a face |
+| `tools/activation-try.sh` end to end, as root | **pending.** The smoke run above was done by hand as an unprivileged user, so every request was refused by `SO_PEERCRED` before it was answered; the harness needs `sudo` |
+| A real install: units, `faciolock` user, sandbox, module in `/usr/lib/*/security` | **observed 2026-08-30 00:45**, `tools/install-local.sh`. `faciolock` uid 974 from sysusers, `/usr/libexec/faciolock/faciolockd` stripped to 26 MB, `pam_faciolock.so` in `/usr/lib/x86_64-linux-gnu/security`, `/usr/share/pam-configs/faciolock` present at `Default: no`, socket unit enabled. The install deliberately does not touch `/etc/pam.d`, and `/etc/pam.d/sudo` was confirmed unchanged afterwards — installing the module is not enabling it |
+| **KDE lock screen unlocks by face** | **not started.** It is last on purpose: `sudo` first, alone, because a trial you can only evaluate by locking your own screen is not a trial ([07](07-desktop-and-packaging.md#the-order-and-why-it-is-this-order)) |
+| **`sudo` authenticates by face** (Phase 3's exit) | **pending** — approved by the operator, blocked on a real install and a `sudo` this session cannot authenticate |
 
 ---
 
