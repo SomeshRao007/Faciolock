@@ -1,28 +1,10 @@
-//! Does YuNet find a face in an IR frame at all?
-//!
-//! This is the first measurement in Phase 1 and it tests an assumption every later stage
-//! inherits. YuNet is trained on WIDER Face, which is RGB, and everything downstream —
-//! alignment, embedding, matching, and the falloff test's ROI — depends on it working on
-//! 8-bit near-infrared instead. wiki/05 lists "it underperforms on our own IR corpus" as
-//! an open risk for the embedder and never asks the same question of the detector.
-//!
-//! Run with `-- --nocapture` to see the numbers rather than just the verdict.
-
 mod common;
 
 use faciolock_vision::config::DetectConfig;
 use faciolock_vision::{Detector, Frame};
 
-/// How far into a capture to look for a frame worth detecting on.
 const SEARCH_FRAMES: usize = 20;
 
-/// The brightest frame past the AGC settle window — i.e. an emitter-ON frame.
-///
-/// Chosen by measurement and not by index. The first version of this test hardcoded frame
-/// 6 and found zero faces in every capture, because on the reference machine index 6 is an
-/// emitter-OFF frame reading 0.004 mean luma: it was detecting on black. That is
-/// [B5](../../../../wiki/11-bug-log.md)'s lesson arriving from a different direction —
-/// **ON/OFF phase is established by measuring luma, never by assuming an index.**
 fn brightest_frame(cap: &common::Capture) -> usize {
     let start = 5.min(cap.frame_count().saturating_sub(1));
     let end = SEARCH_FRAMES.min(cap.frame_count());
@@ -44,8 +26,6 @@ fn yunet_loads_and_reports_the_outputs_this_decode_expects() {
         common::skip("YuNet model", &path);
         return;
     }
-    // Detector::load fails with UnexpectedOutputs if the graph is not the twelve tensors
-    // the decode indexes by position, so a successful load *is* the assertion.
     let det = Detector::load(&path, &DetectConfig::default());
     assert!(det.is_ok(), "{:?}", det.err());
 }
@@ -127,18 +107,6 @@ fn a_face_is_found_on_live_captures_and_not_in_an_empty_room() {
     assert!(checked > 0, "no live_* or null_* captures were available to check");
 }
 
-/// The landmark-scale question, measured rather than argued.
-///
-/// A 640x360 frame letterboxed to 192 puts a laptop-distance face at roughly 45 px, and
-/// its landmarks then scale back up 3.3x into the alignment. The cost of that is not a
-/// matter of opinion: run the same frame through progressively larger inputs and see where
-/// the landmarks stop moving. Whatever the sequence converges to is the answer the
-/// detector is capable of, and the distance from a given size to that limit is that size's
-/// error. Latency for each size is measured in the same pass, since the trade-off is only
-/// meaningful with both halves.
-///
-/// Reports, asserts nothing. The number it produces is what sets `DetectConfig::input_size`
-/// and what goes into wiki/06 — a threshold chosen from data, per wiki/05's own standard.
 #[test]
 fn landmark_convergence_across_detector_input_sizes() {
     let path = common::yunet();
@@ -152,7 +120,6 @@ fn landmark_convergence_across_detector_input_sizes() {
         return;
     }
 
-    // The largest is the reference: the others are measured as displacement from it.
     const SIZES: [usize; 4] = [160, 192, 320, 448];
     let detectors: Vec<(usize, Detector)> = SIZES
         .iter()

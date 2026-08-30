@@ -1,19 +1,3 @@
-//! The wire between the PAM module and the daemon.
-//!
-//! wiki/04 specifies this protocol in full and this crate is that specification, typed.
-//! Fixed layout, hard-capped sizes, **no allocation driven by the peer** — a username
-//! lives in a `[u8; 32]` rather than a `String`, so a hostile length field cannot ask the
-//! root process to reserve anything.
-//!
-//! `#![no_std]` is deliberate and checkable. The crate is linked into every process that
-//! authenticates a user, `sudo` included, against wiki/06's 200 KB budget for the module.
-//!
-//! **This is the type definitions only.** Phase 3 owns the security work — `catch_unwind`
-//! at the FFI boundary, the `SO_PEERCRED` gate, remote-session rejection, `cargo-fuzz` on
-//! this parser, and the CI assertion on the dependency tree. What is here now exists
-//! because the Phase 2 exit criterion needs the daemon to answer a socket, and writing the
-//! specified messages is strictly less work than writing throwaways and replacing them.
-
 #![no_std]
 
 #[cfg(test)]
@@ -22,41 +6,18 @@ extern crate std;
 use core::fmt;
 use core::str;
 
-/// Protocol version. A peer speaking anything else is refused rather than guessed at.
 pub const VERSION: u8 = 1;
 
-/// wiki/04's cap. `useradd` allows 32 characters, and this is a fixed array, so the cap is
-/// a compile-time fact rather than a runtime check that could be forgotten.
 pub const MAX_USERNAME: usize = 32;
 
-/// How many poses a guided enrolment collects (Phase 5).
-///
-/// It lives here rather than in either binary because **both ends count**: `faciolockctl`
-/// prompts this many times and the daemon writes the template on the last one. Two constants
-/// that must agree are one constant, or the CLI stops prompting a pose early and the daemon
-/// waits forever for a request that is never sent.
-///
-/// The response is four fixed bytes and carries no "how many left" field, deliberately —
-/// [`Response`] is parsed by the PAM module in a root process and Phase 5 changes nothing
-/// about it.
 pub const ENROL_POSES: usize = 3;
 
-/// `version | op | timeout_ms | username_len` before the name itself.
 const HEADER: usize = 5;
 
-/// Largest legal request. Also the receive buffer size — a datagram longer than this is
-/// refused without being read into anything.
 pub const REQUEST_MAX: usize = HEADER + MAX_USERNAME;
 
-/// Responses are fixed-width. Nothing about them varies with the request.
 pub const RESPONSE_LEN: usize = 4;
 
-/// Little-endian on the wire.
-///
-/// Both ends are always the same machine — this is a Unix socket — so native order would
-/// work. It is specified anyway: "whatever this architecture does" is not a wire format,
-/// and Debian builds on big-endian s390x, where a native-order reader and a native-order
-/// writer agreeing with each other would hide the fact that nobody ever decided.
 fn u16_from(bytes: [u8; 2]) -> u16 {
     u16::from_le_bytes(bytes)
 }
@@ -66,13 +27,6 @@ pub enum Op {
     Auth = 1,
     Enroll = 2,
     Status = 3,
-    /// "This user authenticated successfully, by some means." Sent from
-    /// `pam_sm_acct_mgmt`, which PAM runs after the whole stack has succeeded, and the
-    /// only thing that lifts the hard lockout in wiki/03 R5 (decision P4-b).
-    ///
-    /// It is not an authenticator and it grants nothing. Its entire effect is to reset a
-    /// failure counter, and the peer is already root — a peer that could lie to this op
-    /// could simply delete the counter file.
     Clear = 4,
 }
 
@@ -88,12 +42,6 @@ impl Op {
     }
 }
 
-/// What the daemon tells the PAM module.
-///
-/// **Narrower than `faciolock_vision::Verdict` on purpose.** The pipeline distinguishes
-/// `NoFace` from `NotLive` from `NoMatch`; none of that crosses the socket. Telling a
-/// caller which check rejected them is telling an attacker what to fix, and the detail
-/// belongs in the journal, where Phase 4 puts it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verdict {
     Deny = 0,
@@ -101,18 +49,10 @@ pub enum Verdict {
     Unavailable = 2,
     NoEnrolment = 3,
     RateLimited = 4,
-    /// The daemon did the bookkeeping [`Op::Clear`] asked for. Carries no authorisation
-    /// and the caller discards it — `pam_sm_acct_mgmt` returns `PAM_IGNORE` whatever
-    /// comes back.
     Ack = 5,
 }
 
 impl Verdict {
-    /// The single place this side of the socket recognises a success.
-    ///
-    /// Exhaustive rather than a `==`, so a variant added later cannot default to allow by
-    /// being forgotten — the same discipline as `faciolock_vision::Verdict::is_allow` and
-    /// as wiki/09's single-`PAM_SUCCESS`-construction-site rule.
     pub fn is_allow(&self) -> bool {
         match self {
             Verdict::Allow => true,
@@ -139,18 +79,12 @@ impl Verdict {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ProtocolError {
-    /// Peer speaks a version we do not.
     Version(u8),
-    /// Datagram shorter than its own header claims.
     Truncated,
-    /// Datagram longer than the message it contains. `SOCK_SEQPACKET` preserves message
-    /// boundaries, so trailing bytes are not framing slack — they are someone trying
-    /// something.
     Trailing,
     UnknownOp(u8),
     UnknownVerdict(u8),
     UsernameTooLong(usize),
-    /// A username outside the POSIX portable filename character set.
     UsernameCharset,
 }
 
@@ -170,12 +104,9 @@ impl fmt::Display for ProtocolError {
     }
 }
 
-/// A request from the PAM module.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Request {
     pub op: Op,
-    /// What the client would like. The daemon applies its own hard timeout regardless —
-    /// wiki/04 — so this is a hint, not a contract.
     pub timeout_ms: u16,
     name: [u8; MAX_USERNAME],
     len: u8,
@@ -195,13 +126,10 @@ impl Request {
         Ok(Request { op, timeout_ms, name, len: bytes.len() as u8 })
     }
 
-    /// Always valid UTF-8: the charset check at construction and at decode admits only
-    /// ASCII, so this cannot fail on a `Request` that exists.
     pub fn username(&self) -> &str {
         str::from_utf8(&self.name[..self.len as usize]).unwrap_or("")
     }
 
-    /// Serialise into a caller-owned buffer. Returns the number of bytes written.
     pub fn encode(&self, out: &mut [u8; REQUEST_MAX]) -> usize {
         let n = self.len as usize;
         out[0] = VERSION;
@@ -222,8 +150,6 @@ impl Request {
         let op = Op::from_wire(bytes[1])?;
         let timeout_ms = u16_from([bytes[2], bytes[3]]);
 
-        // The length is read, bounds-checked against a constant, and only then used. It
-        // never sizes an allocation, because there is no allocation to size.
         let len = bytes[4] as usize;
         if len > MAX_USERNAME {
             return Err(ProtocolError::UsernameTooLong(len));
@@ -244,9 +170,6 @@ impl Request {
     }
 }
 
-/// Shows the name rather than 32 bytes of mostly padding. A username is not a secret —
-/// it is already in the journal, the process table and `PAM_USER` — but the trailing zeros
-/// are noise that makes a failing assertion harder to read.
 impl fmt::Debug for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Request")
@@ -257,7 +180,6 @@ impl fmt::Debug for Request {
     }
 }
 
-/// The daemon's answer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Response {
     pub verdict: Verdict,
@@ -290,11 +212,6 @@ impl Response {
     }
 }
 
-/// POSIX portable filename character set, minus a leading hyphen.
-///
-/// Usernames reach the daemon from a root process and are used to look up a uid, so this
-/// is not the last line of defence. It is the cheapest one: refusing `/`, NUL, whitespace
-/// and shell metacharacters at the wire boundary means no later stage has to remember to.
 fn is_portable_username(bytes: &[u8]) -> bool {
     if bytes.is_empty() || bytes[0] == b'-' {
         return false;
@@ -325,8 +242,6 @@ mod tests {
         assert_eq!(Response::decode(&res.encode()), Ok(res));
     }
 
-    /// Exactly one verdict is an allow, and a variant added later must not join it by
-    /// accident.
     #[test]
     fn only_allow_is_an_allow() {
         assert!(Verdict::Allow.is_allow());
@@ -341,8 +256,6 @@ mod tests {
         }
     }
 
-    /// Every wire code round-trips, in both directions, so a variant added on one side
-    /// and forgotten on the other fails here rather than at a lock screen.
     #[test]
     fn every_op_and_verdict_survives_the_wire() {
         for op in [Op::Auth, Op::Enroll, Op::Status, Op::Clear] {
@@ -363,14 +276,12 @@ mod tests {
         }
     }
 
-    /// A length field larger than the datagram must not read past it. There is no
-    /// allocation to overshoot, but there is a slice.
     #[test]
     fn a_lying_length_field_is_refused_not_trusted() {
         let mut buf = [0u8; REQUEST_MAX];
         buf[0] = VERSION;
         buf[1] = Op::Auth as u8;
-        buf[4] = 31; // claims 31 bytes of username in a 6-byte datagram
+        buf[4] = 31;
         assert_eq!(Request::decode(&buf[..6]), Err(ProtocolError::Truncated));
     }
 
@@ -383,7 +294,6 @@ mod tests {
         assert_eq!(Request::decode(&buf), Err(ProtocolError::UsernameTooLong(200)));
     }
 
-    /// `SOCK_SEQPACKET` preserves message boundaries, so extra bytes are not slack.
     #[test]
     fn trailing_bytes_are_an_error_not_padding() {
         let req = Request::new(Op::Auth, "csr", 400).expect("valid");
@@ -425,8 +335,6 @@ mod tests {
         }
     }
 
-    /// A charset violation must be caught on the way *in* as well as on the way out — the
-    /// decoder is the side an attacker controls.
     #[test]
     fn the_decoder_enforces_the_charset_too() {
         let mut buf = [0u8; REQUEST_MAX];
@@ -439,8 +347,6 @@ mod tests {
 
     #[test]
     fn a_username_at_the_cap_still_fits_the_buffer() {
-        // Spelled out rather than built, because this crate is `no_std` and a test that
-        // needed `alloc` would quietly weaken the property the attribute exists to hold.
         let name = "abcdefghijklmnopqrstuvwxyz012345";
         assert_eq!(name.len(), MAX_USERNAME);
         let req = Request::new(Op::Auth, name, 0).expect("32 bytes is legal");

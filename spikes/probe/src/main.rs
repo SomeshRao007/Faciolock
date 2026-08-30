@@ -1,42 +1,11 @@
-//! Phase 0 strobe-liveness probe.
-//!
-//! Reads a raw Y800 burst recorded by `tools/record.sh` and reports the four
-//! quantities the liveness design in `wiki/05-vision-pipeline.md` rests on:
-//!
-//!   * ON/OFF classification by mean luma      -- does this hardware self-strobe?
-//!   * D = mean(ON) - mean(OFF) over the ROI   -- response test
-//!   * mean(OFF)/mean(ON)                      -- dark-frame integrity, as a RATIO
-//!   * spatial falloff of D across a cell grid -- the print-vs-face signal
-//!
-//! Everything is a ratio or a shape. Nothing is thresholded on absolute brightness:
-//! the OFF floor moved 10x between two runs on the same machine and the ON series
-//! does not decay monotonically. See wiki/10 Probe 3b.
-//!
-//! This is a measurement tool, not a classifier. It prints numbers so thresholds can
-//! be chosen from data. It deliberately does not emit a live/spoof verdict -- that
-//! decision belongs in `faciolock-vision` once there is a corpus to calibrate against.
-//!
-//! Usage:  probe <file.gray> [width] [height]
-
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-/// Frames to drop from the head of a capture. The AGC needs a few frames to converge
-/// and the first ones are garbage -- 22.7, 23.4, 14.3, 31.4 on the reference machine
-/// before it settles into a clean alternation. wiki/10 Probe 3.
 const AGC_SETTLE_FRAMES: usize = 5;
 
-/// Cell grid used for the falloff test. 6x6 over the ROI gives 36 samples: enough
-/// for the shape of the falloff to show up, coarse enough that each cell still
-/// averages over ~4800 pixels and is not dominated by sensor noise.
 const GRID: usize = 6;
 
-/// Fraction of the frame treated as the region of interest, centred.
-///
-// ponytail: centre crop instead of a real face box. At laptop distance the face
-// fills most of the frame, which is enough to compare live-vs-print falloff. Swap
-// for the YuNet detection box in Phase 1 -- at that point the ROI tracks the face
-// instead of assuming it is centred, and off-centre captures stop being noise.
+// ponytail: centre crop, not a face box
 const ROI_FRACTION: f64 = 0.5;
 
 fn main() {
@@ -51,10 +20,6 @@ fn main() {
     let width = parse_dim(args.get(2), 640, "width");
     let height = parse_dim(args.get(3), 360, "height");
 
-    // A capture with no sidecar is a capture nobody can interpret: no record of what
-    // was in front of the camera, so it can neither be trusted as a positive nor as a
-    // negative. Warn rather than refuse -- the pixels are still readable, and the
-    // operator may know what it is. But it must not join the corpus silently.
     if let Some(stem) = path.strip_suffix(".gray") {
         let sidecar = format!("{stem}.json");
         if !std::path::Path::new(&sidecar).exists() {
@@ -92,10 +57,6 @@ fn parse_dim(arg: Option<&String>, default: usize, name: &str) -> usize {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Geometry
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy)]
 struct Roi {
     x0: usize,
@@ -106,9 +67,6 @@ struct Roi {
 
 impl Roi {
     fn centred(width: usize, height: usize, fraction: f64) -> Roi {
-        // Round the ROI down to a whole number of grid cells so every cell holds the
-        // same pixel count. Unequal cells would put a systematic bias in the falloff
-        // variance, which is the one number this tool exists to measure.
         let rw = ((width as f64 * fraction) as usize / GRID) * GRID;
         let rh = ((height as f64 * fraction) as usize / GRID) * GRID;
         Roi {
@@ -120,11 +78,6 @@ impl Roi {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Frame arithmetic
-// ---------------------------------------------------------------------------
-
-/// Mean luma over the whole frame.
 fn mean_frame(frame: &[u8]) -> f64 {
     if frame.is_empty() {
         return 0.0;
@@ -133,7 +86,6 @@ fn mean_frame(frame: &[u8]) -> f64 {
     sum as f64 / frame.len() as f64
 }
 
-/// Mean luma over the ROI.
 fn mean_roi(frame: &[u8], width: usize, roi: &Roi) -> f64 {
     let mut sum = 0u64;
     for y in roi.y0..roi.y0 + roi.h {
@@ -146,7 +98,6 @@ fn mean_roi(frame: &[u8], width: usize, roi: &Roi) -> f64 {
     sum as f64 / (roi.w * roi.h) as f64
 }
 
-/// Mean luma of each cell of a GRID x GRID tiling of the ROI, row-major.
 fn cell_means(frame: &[u8], width: usize, roi: &Roi) -> Vec<f64> {
     let cw = roi.w / GRID;
     let ch = roi.h / GRID;
@@ -169,16 +120,6 @@ fn cell_means(frame: &[u8], width: usize, roi: &Roi) -> Vec<f64> {
     out
 }
 
-/// Coefficient of variation of the per-cell response.
-///
-/// This is the falloff metric. A live face is a curved, three-dimensional diffuse
-/// reflector: cells covering the nose and forehead brighten far more than cells on
-/// the cheeks and jaw, so the spread of D across cells is large relative to its mean.
-/// A flat print reflects near-uniformly, so the spread collapses.
-///
-/// Expressed as std/mean rather than raw std so it stays comparable across captures
-/// at different distances and different AGC states -- the same reason everything
-/// else here is a ratio.
 fn falloff_cv(d_cells: &[f64]) -> f64 {
     let m = mean(d_cells);
     if m.abs() < f64::EPSILON {
@@ -188,13 +129,6 @@ fn falloff_cv(d_cells: &[f64]) -> f64 {
     var.sqrt() / m
 }
 
-/// Ratio of response in the centre cells to response in the border ring.
-///
-/// A second, independent read on the same physics as `falloff_cv`, and one that has a
-/// direction: on a face the centre (nose, brow -- nearest the emitter) outshines the
-/// periphery, so this sits above 1. On a flat surface held square to the camera it
-/// sits near 1. Reported alongside CV because a crumpled or tilted print could raise
-/// CV without producing a centre-bright pattern.
 fn centre_edge_ratio(d_cells: &[f64]) -> f64 {
     let mut centre = Vec::new();
     let mut edge = Vec::new();
@@ -226,7 +160,6 @@ fn mean(xs: &[f64]) -> f64 {
     xs.iter().sum::<f64>() / xs.len() as f64
 }
 
-/// Percentile by nearest rank. `xs` must already be sorted ascending.
 fn percentile(xs: &[f64], p: f64) -> f64 {
     if xs.is_empty() {
         return f64::NAN;
@@ -235,28 +168,17 @@ fn percentile(xs: &[f64], p: f64) -> f64 {
     xs[idx]
 }
 
-// ---------------------------------------------------------------------------
-// Capture
-// ---------------------------------------------------------------------------
-
 #[derive(PartialEq, Clone, Copy, Debug)]
 enum Phase {
     On,
     Off,
 }
 
-/// What the alternation pattern says about this hardware. Maps onto the capability
-/// tiers in wiki/05 -- the point of classifying by observation is that it needs no
-/// writes to the device.
 #[derive(PartialEq, Debug)]
 enum Tier {
-    /// Clean ON/OFF alternation. Full liveness available.
     IrStrobe,
-    /// Emitter appears to be on continuously. Passive checks only.
     IrConstant,
-    /// Every frame dark. Emitter is off -- needs one-time setup.
     EmitterDark,
-    /// Frames vary but not in a strobe pattern.
     Irregular,
 }
 
@@ -275,18 +197,11 @@ struct Pair {
     index: usize,
     on_mean: f64,
     off_mean: f64,
-    /// Response: mean(ON) - mean(OFF) over the ROI.
     d: f64,
-    /// mean(ON)/mean(OFF). The quantity that stayed stable across sessions.
     ratio: f64,
-    /// mean(OFF)/mean(ON). Dark-frame integrity -- high means the scene is being
-    /// flooded with external IR and the difference test is being washed out.
     dark_ratio: f64,
     falloff_cv: f64,
     centre_edge: f64,
-    /// Per-cell response, row-major over the GRID x GRID tiling. Retained so the
-    /// report can show *where* the response is, not just how uneven it is -- a
-    /// summary statistic cannot tell you whether the ROI is even pointed at a face.
     d_cells: Vec<f64>,
 }
 
@@ -329,9 +244,6 @@ impl Capture {
         let roi = Roi::centred(width, height, ROI_FRACTION);
         let pairs = build_pairs(&frames[usable..], &phases, width, &roi);
 
-        // Deliberately computed from the same post-AGC means the ratio test saw, so the
-        // two views are answering the same question about the same data and any
-        // disagreement between them is a real disagreement.
         let alternation = alternation(&frame_means[usable..]);
 
         Ok(Capture {
@@ -448,11 +360,6 @@ impl Capture {
         s
     }
 
-    /// Mean response per cell, as a percentage of the strongest cell.
-    ///
-    /// The summary statistics say how uneven the response is. They cannot say whether
-    /// the unevenness is a face, or the ROI hanging off the edge of one. This map can:
-    /// a centred face is a bright blob in the middle, and anything else is not.
     fn cell_map(&self) -> String {
         let mut s = String::new();
         if self.pairs.is_empty() {
@@ -501,13 +408,6 @@ impl Capture {
     }
 }
 
-/// Split frames into ON and OFF by mean luma, and judge what pattern they form.
-///
-/// The split point is the midpoint between the dimmest and brightest frame. On
-/// strobing hardware the two populations are separated by four to five orders of
-/// magnitude, so where exactly the cut falls between them does not matter. What does
-/// matter is recognising when there is no separation at all, which is the
-/// `ir-constant` and `emitter-dark` case -- hence the spread check first.
 fn classify(means: &[f64]) -> (Vec<Phase>, Tier) {
     if means.is_empty() {
         return (Vec::new(), Tier::Irregular);
@@ -516,9 +416,6 @@ fn classify(means: &[f64]) -> (Vec<Phase>, Tier) {
     let lo = means.iter().cloned().fold(f64::INFINITY, f64::min);
     let hi = means.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-    // Require the bright population to be at least 10x the dark one before calling
-    // it a strobe. Anything less is AGC wobble on a constantly-lit sensor, not an
-    // emitter being switched.
     let separated = hi > lo * 10.0 && hi > 1.0;
 
     if !separated {
@@ -536,7 +433,6 @@ fn classify(means: &[f64]) -> (Vec<Phase>, Tier) {
         .map(|&m| if m > split { Phase::On } else { Phase::Off })
         .collect();
 
-    // A strobe alternates every frame. Count how often it actually does.
     let flips = phases.windows(2).filter(|w| w[0] != w[1]).count();
     let tier = if flips >= phases.len().saturating_sub(1) * 9 / 10 {
         Tier::IrStrobe
@@ -547,36 +443,13 @@ fn classify(means: &[f64]) -> (Vec<Phase>, Tier) {
     (phases, tier)
 }
 
-/// The strobe seen as a *difference* rather than a *ratio*.
-///
-/// Added 2026-08-06, because the ratio view failed. `classify` above asks whether the
-/// brightest frame is 10x the dimmest, which is 15,000:1 at night and 1.15:1 in daylight
-/// on the same hardware with the same emitter firing every single frame. Ambient NIR adds
-/// a pedestal to both phases and a ratio saturates against a pedestal; a difference does
-/// not. wiki/11 B18.
-///
-/// Nothing here is thresholded. It reports the quantities a threshold would have to be
-/// chosen from, which is this tool's whole job.
 #[derive(Clone, Copy)]
 struct Alternation {
-    /// Median |m[i+1] - m[i]|. The emitter's contribution to the frame mean.
     amplitude: f64,
-    /// Median |m[i+2] - m[i]| -- consecutive frames of the *same* phase, so the emitter
-    /// contributes nothing and what is left is AGC drift, scene motion and read noise.
-    /// This is the noise floor the emitter has to beat, measured on the same capture
-    /// rather than assumed.
     same_phase: f64,
-    /// amplitude / same_phase. Dimensionless, and unlike the ratio it does not care what
-    /// the ambient pedestal is.
     snr: f64,
-    /// Fraction of steps where the difference reverses sign. A strobe alternates every
-    /// frame, so a real one sits at ~1.0. Distinguishes an emitter from a scene that
-    /// merely got brighter.
     sign_regularity: f64,
-    /// Dimmest frame mean: the ambient floor the emitter is riding on.
     pedestal: f64,
-    /// amplitude / mean. What fraction of the signal the emitter accounts for -- the
-    /// quantity that collapsed in daylight even though `amplitude` did not.
     modulation: f64,
 }
 
@@ -588,7 +461,6 @@ fn alternation(means: &[f64]) -> Option<Alternation> {
     let steps: Vec<f64> = means.windows(2).map(|w| w[1] - w[0]).collect();
     let mut mags: Vec<f64> = steps.iter().map(|d| d.abs()).collect();
 
-    // Same-phase pairs skip a frame, so the emitter state is identical at both ends.
     let mut same: Vec<f64> = means.windows(3).map(|w| (w[2] - w[0]).abs()).collect();
 
     mags.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -603,10 +475,6 @@ fn alternation(means: &[f64]) -> Option<Alternation> {
     Some(Alternation {
         amplitude,
         same_phase,
-        // A same-phase floor of exactly zero is a real reading on this hardware at night:
-        // two true dark frames are identical. Report it as unbounded rather than dividing
-        // by zero, which is honest -- the emitter beat the noise by more than the capture
-        // can resolve.
         snr: if same_phase > 0.0 { amplitude / same_phase } else { f64::INFINITY },
         sign_regularity: flips as f64 / steps.len().saturating_sub(1).max(1) as f64,
         pedestal,
@@ -614,11 +482,6 @@ fn alternation(means: &[f64]) -> Option<Alternation> {
     })
 }
 
-/// Pair each ON frame with an adjacent OFF frame and measure the pair.
-///
-/// Adjacency matters: pairing an ON frame with a distant OFF frame would let AGC
-/// drift and scene motion contaminate D. Neighbours are ~33 ms apart, which is short
-/// enough that the only thing that changed is the emitter.
 fn build_pairs(frames: &[&[u8]], phases: &[Phase], width: usize, roi: &Roi) -> Vec<Pair> {
     let mut pairs = Vec::new();
 
@@ -663,7 +526,6 @@ fn build_pairs(frames: &[&[u8]], phases: &[Phase], width: usize, roi: &Roi) -> V
         });
     }
 
-    // Keep every other pair so no frame is used twice.
     pairs
         .into_iter()
         .enumerate()
@@ -676,10 +538,6 @@ fn build_pairs(frames: &[&[u8]], phases: &[Phase], width: usize, roi: &Roi) -> V
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,13 +549,10 @@ mod tests {
         vec![v; W * H]
     }
 
-    /// A flat reflector: uniform response everywhere, like a printed photo.
     fn flat(v: u8) -> Vec<u8> {
         blank(v)
     }
 
-    /// A domed reflector: brightest at the centre, falling off radially, like a face
-    /// lit by an emitter beside the lens.
     fn domed(peak: u8, floor: u8) -> Vec<u8> {
         let mut f = vec![0u8; W * H];
         let (cx, cy) = (W as f64 / 2.0, H as f64 / 2.0);
@@ -706,7 +561,7 @@ mod tests {
             for x in 0..W {
                 let dx = x as f64 - cx;
                 let dy = y as f64 - cy;
-                let t = (dx * dx + dy * dy).sqrt() / max_r; // 0 at centre, 1 at corner
+                let t = (dx * dx + dy * dy).sqrt() / max_r;
                 let v = peak as f64 - t * (peak - floor) as f64;
                 f[y * W + x] = v.clamp(0.0, 255.0) as u8;
             }
@@ -739,9 +594,6 @@ mod tests {
         assert!((d - 59.0).abs() < 1e-9);
     }
 
-    /// The whole point of the falloff test: a curved reflector must score higher
-    /// than a flat one. If this ever fails, the print-rejection claim in wiki/05 has
-    /// no mechanism behind it.
     #[test]
     fn domed_response_has_higher_falloff_cv_than_flat() {
         let r = roi();
@@ -785,8 +637,6 @@ mod tests {
         assert!(centre_edge_ratio(&domed_d) > 1.2);
     }
 
-    /// Absolute brightness must not change the falloff verdict -- AGC droop moves it
-    /// by 13% within a single capture and 10x between sessions. wiki/10 Probe 3b.
     #[test]
     fn falloff_cv_is_invariant_to_overall_gain() {
         let r = roi();
@@ -799,7 +649,6 @@ mod tests {
                 .collect();
             falloff_cv(&d)
         };
-        // Same shape, half the gain.
         let bright = cv_at(120, 20);
         let dim = cv_at(60, 10);
         assert!(
@@ -819,12 +668,6 @@ mod tests {
         assert_eq!(phases[1], Phase::Off);
     }
 
-    /// The property the whole difference-domain view exists for: adding an ambient
-    /// pedestal to *both* phases must not change the measured strobe at all.
-    ///
-    /// This is the daylight case reduced to arithmetic. The ratio test calls the first
-    /// series a strobe and the second constant illumination; the emitter is identical in
-    /// both. If this test ever fails, the new statistic has picked up the old one's bug.
     #[test]
     fn alternation_is_invariant_to_an_ambient_pedestal() {
         let night: Vec<f64> = (0..30).map(|i| if i % 2 == 0 { 14.004 } else { 0.004 }).collect();
@@ -837,15 +680,10 @@ mod tests {
         assert!((n.sign_regularity - d.sign_regularity).abs() < 1e-9);
         assert_eq!(n.snr, d.snr, "SNR must not depend on the ambient floor");
 
-        // And the ratio test disagrees with itself across exactly this pair, which is the
-        // bug being worked around.
         assert_eq!(classify(&night).1, Tier::IrStrobe);
         assert_eq!(classify(&daylight).1, Tier::IrConstant);
     }
 
-    /// Modulation *should* collapse under a pedestal -- it is the fraction of the signal
-    /// the emitter accounts for. Reported precisely so the two are not confused: it is the
-    /// quantity that legitimately got worse, while amplitude and SNR did not.
     #[test]
     fn modulation_collapses_under_a_pedestal_even_though_snr_does_not() {
         let night: Vec<f64> = (0..30).map(|i| if i % 2 == 0 { 14.0 } else { 0.0 }).collect();
@@ -855,8 +693,6 @@ mod tests {
         assert!(n.modulation > 10.0 * d.modulation, "{} vs {}", n.modulation, d.modulation);
     }
 
-    /// A sensor that is merely drifting, with no emitter, must not look like a strobe:
-    /// its steps do not reverse sign.
     #[test]
     fn a_monotonic_drift_is_not_an_alternation() {
         let drifting: Vec<f64> = (0..30).map(|i| 100.0 - i as f64 * 0.4).collect();
@@ -866,7 +702,6 @@ mod tests {
 
     #[test]
     fn classify_detects_constant_illumination() {
-        // AGC wobble on a steadily-lit sensor must not read as a strobe.
         let means: Vec<f64> = (0..30).map(|i| 55.0 + (i % 3) as f64).collect();
         let (_, tier) = classify(&means);
         assert_eq!(tier, Tier::IrConstant);
@@ -881,7 +716,6 @@ mod tests {
 
     #[test]
     fn end_to_end_on_a_synthetic_strobe_capture() {
-        // 20 frames alternating a domed "face" with a near-dark reference.
         let mut bytes = Vec::new();
         for i in 0..20 {
             if i % 2 == 0 {
@@ -898,7 +732,6 @@ mod tests {
             assert!(p.dark_ratio < 0.01, "dark frame must be dark relative to ON");
             assert!(p.centre_edge > 1.2, "domed source must read centre-bright");
         }
-        // No frame may be used by two pairs.
         assert!(cap.pairs.len() <= 20 / 2);
     }
 
