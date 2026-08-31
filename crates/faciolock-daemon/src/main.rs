@@ -9,7 +9,7 @@ mod users;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use faciolock_ipc::{ENROL_POSES, Op, Request, Verdict};
@@ -80,7 +80,7 @@ fn start(config_path: &Path) -> Result<Daemon, String> {
     let limiter = Mutex::new(Limiter::load(&cfg.ratelimit));
 
     Ok(Daemon {
-        session: Arc::new(Mutex::new(Session::new(cfg.clone()))),
+        session: Mutex::new(Session::new(cfg.clone())),
         limiter,
         pending: Mutex::new(None),
         pipeline,
@@ -89,7 +89,7 @@ fn start(config_path: &Path) -> Result<Daemon, String> {
 }
 
 pub struct Daemon {
-    session: Arc<Mutex<Session>>,
+    session: Mutex<Session>,
     limiter: Mutex<Limiter>,
     pending: Mutex<Option<Pending>>,
     pipeline: Pipeline,
@@ -158,20 +158,6 @@ impl Daemon {
             if ours { "self-bound" } else { "socket-activated" },
             idle.map_or("off".into(), |d| format!("{} s", d.as_secs()))
         );
-
-        let warming = Arc::clone(&self.session);
-        std::thread::spawn(move || {
-            let mut session = warming.lock().unwrap_or_else(|p| p.into_inner());
-            match session.burst() {
-                Ok(b) => eprintln!(
-                    "faciolockd: camera warm on {}, {} frames in {} ms",
-                    session.device().map_or("(discovered)".into(), |d| d.display().to_string()),
-                    b.meta.len(),
-                    b.sensor_span().as_millis()
-                ),
-                Err(e) => eprintln!("faciolockd: camera unavailable at startup ({e}); will retry"),
-            }
-        });
 
         serve::run(&listener, &self, idle);
 
