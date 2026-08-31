@@ -519,14 +519,40 @@ bursts still paired, and a uniformly random truncation landed on a frame boundar
 64. Without those two assertions both tests would have passed convincingly while testing the
 early returns. Mutation from valid inputs fixed both.
 
+### The lock screen cannot reach the socket either (Q10)
+
+Measured 2026-08-31, before the leg was attempted, and it is P6-a's wall from the other side.
+`kscreenlocker_greet` is not setuid, links `libpam` directly and runs inside the user's
+session; Plasma 6.6.5 ships no `kcheckpass`, no system D-Bus service and no polkit action
+behind it — the password prompt works because `unix_chkpwd` is setgid `shadow`. The socket is
+`0600 root:root` with a `SO_PEERCRED` root check behind it, so the module gets `EACCES`,
+returns `PAM_AUTHINFO_UNAVAIL`, and the lock screen falls through to the password field
+silently and permanently. Nothing breaks; nothing ever shows a face.
+
+`sudo`, `su`, `login` and `sddm` authenticate as root and are untouched by this.
+
+**Decided the same day — [P6-d](README.md#decisions-taken), open the socket.** `0660
+root:faciolock-auth`, and R2 moves off the file mode onto `SO_PEERCRED`: root asks about
+anybody, anybody else asks about themselves and only `Auth`/`Status`. `Clear` stays root-only
+because a session process that can reset its own failure counter has unlimited face attempts,
+and `Enroll` stays root-only because it writes a template. Four files and a pure function; the
+trade the operator took is that anything running as you can turn the emitter on and spend your
+budget, which is where `fprintd` already sits.
+
+It carries one unfixed knock-on — the lock screen cannot clear a spent budget either, so three
+refused faces there turn face unlock off until a `sudo` or a `login` clears it. Written up
+with the two candidate fixes at
+[Q10](08-open-questions.md#the-knock-on-and-it-is-not-fixed-the-lock-screen-cannot-clear-a-spent-budget).
+
 **Exit:** zero RSS when idle (`pidof faciolockd` empty). KDE lock screen unlocks by
 face *and* password entry still works instantly while the camera is running.
 
-**Status: the first half is met, the second is not started.**
+**Status: the first half is met. The second is now unblocked but not observed** — the code is
+written and tested, the install and the lock screen itself are not yet run.
 
 | Leg | State |
 |---|---|
-| 195 tests across the workspace, no camera attached | **observed**, `cargo test --workspace`, 0 failed — 189 before this phase |
+| Tests across the workspace, no camera attached | **observed** — `cargo test --workspace`, **198 passed, 0 failed**, 5 ignored (they want hardware). 189 before this phase |
 | The fuzz crate did not leak into the PAM module's tree | **observed** — `cargo tree -p faciolock-pam` still reads exactly `libc` + `faciolock-ipc` |
 | A `SOCK_STREAM` listener is refused rather than accepted quietly | **observed**, unit test. One word in a unit file (`ListenStream=` for `ListenSequentialPacket=`) produces a daemon that starts, logs "socket-activated" and mis-parses every request |
 | An idle daemon exits and leaves no process behind | **observed 2026-08-29**, `systemd-socket-activate` against the shipped binary: `socket-activated`, `camera warm … 6 frames in 339 ms`, `idle for 3 s, exiting`, `pgrep -x faciolockd` empty |
@@ -535,11 +561,18 @@ face *and* password entry still works instantly while the camera is running.
 | `systemd-analyze security` ≤ 2.0 | **observed — 0.6**, offline against the unit file |
 | The sandbox runs the real workload, not just the scorer | **observed 2026-08-30**, same journal. `User=faciolock` under the full profile opened `/dev/video2` through `SupplementaryGroups=video` + `DeviceAllow=char-video4linux`, read and SHA256-verified both models out of `/usr/share/faciolock/models` under `ProtectSystem=strict`, and warmed in **335–339 ms** — unchanged from the unsandboxed daemon since Phase 2. Peak RSS 106.4 MB, 449 ms CPU over a 45 s life. A 0.6 score on a service that cannot do its job would have been worth nothing |
 | `faciolockctl diagnose` against the installed system | **observed 2026-08-30**, and only after it found two bugs of its own — [B25](11-bug-log.md#b25) and [B26](11-bug-log.md#b26), both introduced by this phase, both hit by the operator running this one command on a fresh install. Now: names `/dev/video2`, rejects the RGB node and both metadata nodes, reads **alternation 1.00 at 44.8:1**, and writes `device` + `tier` into `/etc/faciolock/faciolockd.toml` |
-| An enrolment in flight blocks the idle-exit | **observed**, unit test (`may_exit`). The wiring — that `serve::run` consults it — is `tools/activation-try.sh` PART 5 and needs a face |
-| `tools/activation-try.sh` end to end, as root | **pending.** The smoke run above was done by hand as an unprivileged user, so every request was refused by `SO_PEERCRED` before it was answered; the harness needs `sudo` |
+| An enrolment in flight blocks the idle-exit | **half observed.** `may_exit` itself is a unit test and passes. That `serve::run` actually consults it is PART 5, and PART 5 **skipped on 2026-08-31**: in daylight the pose came back `Unavailable`, so there was no `Pending` for the guard to protect and the harness refused to assert on it rather than assert the wrong thing ([B18](11-bug-log.md#b18)). It needs one after-dark run and nothing else |
+| `tools/activation-try.sh` end to end, as root | **observed 2026-08-31 — 15 passed, 0 failed**, first run as root, against the installed socket stopped for the duration. Parts 1–4 in full: nothing behind the socket, the first request starts it, `socket-activated` with no `self-bound`, idle-exit armed and taken, the socket outliving the exit, and a second activation counted as two rather than one restart. **PART 5 skipped**: daylight, so the pose came back `Unavailable` and there was no `Pending` to protect — see the row below |
 | A real install: units, `faciolock` user, sandbox, module in `/usr/lib/*/security` | **observed 2026-08-30 00:45**, `tools/install-local.sh`. `faciolock` uid 974 from sysusers, `/usr/libexec/faciolock/faciolockd` stripped to 26 MB, `pam_faciolock.so` in `/usr/lib/x86_64-linux-gnu/security`, `/usr/share/pam-configs/faciolock` present at `Default: no`, socket unit enabled. The install deliberately does not touch `/etc/pam.d`, and `/etc/pam.d/sudo` was confirmed unchanged afterwards — installing the module is not enabling it |
-| **KDE lock screen unlocks by face** | **not started.** It is last on purpose: `sudo` first, alone, because a trial you can only evaluate by locking your own screen is not a trial ([07](07-desktop-and-packaging.md#the-order-and-why-it-is-this-order)) |
-| **`sudo` authenticates by face** (Phase 3's exit) | **pending** — approved by the operator, blocked on a real install and a `sudo` this session cannot authenticate |
+| **KDE lock screen unlocks by face** | **could not have worked before 2026-08-31, and is now unblocked but unobserved.** It was scheduled last on purpose ([07](07-desktop-and-packaging.md#the-order-and-why-it-is-this-order)) and the delay is what caught it: the greeter is unprivileged and the socket was root-only, so `pam_faciolock.so` there got `EACCES` and fell through to the password field forever — enabled, harmless, and incapable of succeeding. [P6-d](README.md#decisions-taken) opened the socket to a group; what is left is an install, `gpasswd -a $USER faciolock-auth`, a re-login and a locked screen after dark |
+| The group gate refuses what it should | **observed**, unit test (`a_session_peer_may_ask_about_itself_and_nothing_else`): root reaches any uid, uid 1000 reaches neither 1001 nor root for any op, an unresolvable name answers nobody but root, and uid 1000 asking about **itself** gets `Auth`/`Status` but not `Clear`/`Enroll` |
+| **An unprivileged peer is answered on real hardware** | **observed 2026-08-31.** Reinstall created `faciolock-auth` (gid 973) from sysusers and the socket came back `srw-rw---- root faciolock-auth`; `sock-try status $USER` as uid 1000 — no `sudo`, no PAM — answered **`Deny (0) 4 ms`**, where the same call before this phase was closed on without a reply. That is the whole of P6-d working: a session process asked about itself and got an answer |
+| The gate's *refusals* on real hardware | **not observed.** `sock-try status root` and `sock-try clear $USER` should both print `no reply (EOF)`; neither was run. The unit test covers the policy, this would cover the wiring — two commands, no camera, any time of day |
+| **`sudo` authenticates by face** (Phase 3's exit) | **observed 2026-08-31, and it closes a row open since Phase 3.** Two lines above `@include common-auth` / `@include common-account` in `/etc/pam.d/sudo`, a root shell held in a second terminal, `sudo -K` to kill the timestamp — and `sudo true` returned **with no password prompt at all**. First `sudo` this project has ever authenticated by face. The file was restored from `sudo.faciolock-backup` afterwards, so the trial is over rather than living |
+| **A face the daemon cannot judge still lets you in with a password** | **observed 2026-08-31, through `pam-auth-update` rather than the by-hand file.** `sudo -K; sudo true` at a covered lens: a password prompt, and the journal names the path — `auth uid=1000 verdict=Unavailable reason=ambient floor=1.31 live=pass probes=0 elapsed=1782 counted=0`. `default=ignore` watched end to end for the first time instead of argued from Phase 3's table. **`counted=0` is the second half of it**: nothing that never saw a face moved the budget, so P2-g's exemption held under a real `sudo` |
+| **A face that is looked at and *refused* still lets you in with a password** | **still not observed.** The run above went `Unavailable`, not `Deny` — the question was never asked, so this is the neighbouring path rather than this one. `default=ignore` treats them identically and Phase 3 observed the return code, but the `Deny` fall-through has never been watched end to end. It needs a face the camera can judge and a face that is not the enrolled one — after dark, alongside the other two |
+| Enabling it does not break the password path for every other service | **observed** — `pam-auth-update --enable faciolock` generated `auth [success=2 default=ignore] pam_faciolock.so` above `pam_unix`, and the arithmetic is right: a face success jumps to `pam_permit`, anything else falls to `pam_unix`, whose own `success=1` lands on the same `pam_permit`. It also rewrote `pam_unix` to `try_first_pass`, which is benign **only because our module never runs a conversation** — it stashes no password, so `try_first_pass` finds none and prompts. A future version that ever prompted would silently change `pam_unix`'s behaviour |
+| **The daylight tax is real and it is now on every `sudo`** | **observed** — the refusal above cost **1,782 ms in the daemon** before the password prompt, on top of the model load when the daemon had idle-exited. In a bright room [B18](11-bug-log.md#b18) means face auth *always* refuses, so enabling the profile in daylight buys nothing and costs two to three seconds per `sudo`. Not a defect; it is `idle_timeout_secs` and B18 meeting, and it is the strongest argument yet for the daylight work rather than for a bigger timeout |
 
 ---
 

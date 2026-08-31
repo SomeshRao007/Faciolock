@@ -43,6 +43,7 @@ if [ "${1:-}" = "--remove" ]; then
 	echo "  /etc/faciolock/       your config"
 	echo "  /var/lib/faciolock/   your enrolment and its key -- rm -rf it yourself if you mean it"
 	echo "  the faciolock user    userdel faciolock"
+	echo "  faciolock-auth        groupdel faciolock-auth (and your membership goes with it)"
 	echo
 	echo "if you enabled PAM, undo that separately:  pam-auth-update --remove faciolock"
 	exit 0
@@ -100,7 +101,11 @@ echo "systemd"
 install -m 0644 "$root/data/systemd/faciolock.socket" /etc/systemd/system/faciolock.socket
 install -m 0644 "$root/data/systemd/faciolock.service" /etc/systemd/system/faciolock.service
 systemctl daemon-reload
-systemctl enable --now faciolock.socket
+systemctl enable faciolock.socket
+# `enable --now` is a no-op on an already-listening socket, so a reinstall that changes
+# SocketMode or SocketGroup would leave the old inode in place and the new unit file unread --
+# an install that reports success and did not take. Restart binds the shipped unit as written.
+systemctl restart faciolock.socket
 
 echo
 systemd-analyze security faciolock.service | tail -1
@@ -111,5 +116,10 @@ echo
 echo "  faciolockctl diagnose --write     find the camera, record the tier"
 echo "  faciolockctl enroll \$USER         three poses"
 echo "  faciolockctl test                 without touching any PAM file"
+echo
+echo "for anything that authenticates in your own session -- the KDE lock screen above all --"
+echo "you also have to join the group the socket is gated on, and log out and back in:"
+echo
+echo "  gpasswd -a \$SUDO_USER faciolock-auth"
 echo
 echo "only then, and read wiki/07 first:  the /etc/pam.d/sudo line, or pam-auth-update"

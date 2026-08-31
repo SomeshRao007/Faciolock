@@ -18,10 +18,16 @@ Documentation=file:///usr/share/doc/faciolock/04-architecture.md
 [Socket]
 ListenSequentialPacket=/run/faciolock.sock
 SocketUser=root
-SocketGroup=root
-# wiki/03 R2: only root may ask. The daemon checks SO_PEERCRED as well, because this line is
-# one edit away from being wrong and the kernel's answer is not.
-SocketMode=0600
+# wiki/03 R2 / P6-d. This was root:root 0600 until Q10 measured the KDE greeter: it is not
+# setuid, it links libpam itself, and it runs in the user's session — so a root-only socket
+# means the lock screen can never show a face, only fall through to the password field.
+#
+# The group is what a human is added to, and it grants exactly one thing: the ability to ask
+# `Auth` and `Status` **about yourself**. `serve::may_ask` enforces that from SO_PEERCRED, so
+# the guarantee does not rest on this line being right — getting the mode wrong here widens
+# who can ask about themselves, not what they can ask.
+SocketGroup=faciolock-auth
+SocketMode=0660
 # One fd, handed whole to one long-lived process. Accept=yes would fork per connection,
 # which is a camera per connection.
 Accept=no

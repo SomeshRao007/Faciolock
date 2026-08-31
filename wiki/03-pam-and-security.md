@@ -128,28 +128,63 @@ both powerful and complex. Details in [04](04-architecture.md).
 ### R2 — The daemon decides *who* you are, the PAM module states *who you claim to be*
 
 The PAM module sends: "the user being authenticated is `csr`, and here is my
-`SO_PEERCRED` proving I am uid 0". The daemon never trusts a username from a
-non-root peer. An unprivileged process connecting to the socket gets refused before
-the camera is even touched — this is what stops A2 from asking the daemon to
-authenticate root and reading back a yes.
-
-Concretely: the socket is mode `0600` owned by root, so only root can connect at all;
-`SO_PEERCRED` is a second, in-band check so a future permission mistake is not
-instantly fatal.
+`SO_PEERCRED` saying which uid I am". The daemon never takes that username on trust from a
+non-root peer — it must be the peer's own — so a request to authenticate `root` from anything
+that is not root is refused before the camera is touched. That is what stops A2 from asking
+the daemon to authenticate root and reading back a yes.
 
 **Built in Phase 3, and one detail is worth stating because it is not the obvious
-choice: a refused peer gets no reply at all.** `serve::handle` reads the peer credentials
-before the request body, and a `uid != 0` connection is closed having caused no decode, no
+choice: a refused peer gets no reply at all.** The connection is closed having caused no
 template lookup and no camera activity. Answering — even `Deny` — would make the socket an
 oracle: an unprivileged process could ask "is `root` enrolled?" and read the difference
 between `Deny` and `NoEnrolment`. Closing says nothing, and wiki/04 already defines socket
 EOF on the caller's side as `PAM_AUTHINFO_UNAVAIL`, so the honest client's behaviour is
 unchanged.
 
-The mode and the credential check are genuinely independent layers, which
-[B23](11-bug-log.md#b23) is a small demonstration of: the mechanism that had been buying the
-0600 turned out to have a scope nobody chose, and the credential check is what meant that
-was a tidiness problem rather than a security one.
+#### Rewritten 2026-08-31 — "only root may ask" could not survive the lock screen (P6-d)
+
+The rule above was enforced at `connect()`: mode `0600 root:root`, plus `SO_PEERCRED` as a
+second in-band check so a permission mistake was not instantly fatal.
+[Q10](08-open-questions.md#q10--the-kde-lock-screen-cannot-reach-the-socket-open-it-or-drop-the-leg--decided-2026-08-31-open-it-option-a)
+measured what that costs: `kscreenlocker_greet` is not setuid and runs in the user's session,
+so a root-only socket means the lock screen can never do anything but fall through to the
+password field. The rule is now split in two, and the split is the point:
+
+| Question | Answered by |
+|---|---|
+| May this process open the socket? | the mode — `0660 root:faciolock-auth` |
+| Who is it, and what may it ask? | `SO_PEERCRED`, in `serve::may_ask` |
+
+```rust
+peer_uid == 0 || (peer_uid == subject && matches!(op, Op::Auth | Op::Status))
+```
+
+Root asks about anybody. Anybody else asks about **themselves**, and only the two questions
+that cannot move the failure budget in their favour — `Clear` would give a session process an
+unlimited supply of face attempts and `Enroll` would let one write a template, so both stay
+root-only by name rather than by file mode.
+
+**The `Option` in that signature is load-bearing and was a defect for about an hour.** The
+first version resolved the username, returned `NoEnrolment` for one that did not exist, and
+*then* asked `may_ask` — so a group member got silence for a real account they may not ask
+about and a `NoEnrolment` for one that does not exist. That is the same oracle this rule was
+written to close, rebuilt out of the difference between a reply and no reply. Folding the
+unresolved case into the policy function is what makes it untestable-by-omission: `subject ==
+Some(peer_uid)` is false for `None`, so an unknown name is refused by the same line that
+refuses somebody else's.
+
+What this gives up, stated plainly: **anything running as you can now turn the IR emitter on
+and ask for a verdict about you, and can spend your failure budget.** No privilege is gained —
+a verdict on the socket authenticates nothing by itself, and the peer can only ever name
+itself. It is roughly where `fprintd` already sits, reached from the other side: a root D-Bus
+service that polkit lets any active local session call `Verify` on.
+
+What it buys back is that the guarantee no longer *rests* on the socket mode. Before, one
+wrong character in a unit file made "only root may ask" untrue. Now a wrong mode widens who
+may ask about themselves and cannot widen what any of them may ask —
+[B23](11-bug-log.md#b23) was the small version of that lesson, where the mechanism buying the
+0600 turned out to have a scope nobody chose and the credential check is what made it a
+tidiness problem rather than a security one.
 
 ### R3 — Verdicts are not transferable
 

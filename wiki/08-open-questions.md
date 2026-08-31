@@ -447,3 +447,108 @@ the IR camera. Install `v4l-utils` if `v4l2-ctl` is missing.
 
 `Faciolock` is the directory name. Before anything is published: check for collisions
 on crates.io, in the Debian archive, and for trademarks. Cheap now, expensive later.
+
+---
+
+## Q10 — The KDE lock screen cannot reach the socket. Open it, or drop the leg? — **DECIDED (2026-08-31): open it, option A**
+
+Phase 6's exit says "KDE lock screen unlocks by face". Measured on the reference machine
+2026-08-31, before any of it was attempted: **it cannot, and no amount of PAM configuration
+changes that.** This is P6-a's finding arriving a second time by a different road.
+
+The chain, each link checked rather than assumed:
+
+| Link | Observed |
+|---|---|
+| The greeter is `/usr/lib/x86_64-linux-gnu/libexec/kscreenlocker_greet` | `-rwxr-xr-x root root` — **no setuid bit**, and it links `libpam.so.0` directly |
+| It is started inside the user's session | by `kwin`; `ksmserver` runs as uid 1000 on this machine |
+| Nothing privileged stands behind it | **no `kcheckpass` anywhere on the system** — Plasma 6.6.5 dropped it — no system D-Bus service and no polkit action for the screen locker |
+| So how does the password work? | `/usr/sbin/unix_chkpwd` is **setgid `shadow`**. The helper is privileged; the greeter is not |
+| The socket | `/run/faciolock.sock`, `srw------- root root`, from `SocketUser`/`SocketGroup`/`SocketMode=0600` in the unit |
+| The daemon, independently | `serve::handle` refuses any peer whose `SO_PEERCRED` uid is not 0 ([R2](03-pam-and-security.md#r2--the-daemon-decides-who-you-are-the-pam-module-states-who-you-claim-to-be)) |
+
+`pam_faciolock.so` loaded into that greeter gets `EACCES` from `connect()`, `client::ask`
+returns `Err`, `authenticate` returns `PAM_AUTHINFO_UNAVAIL`, and `common-auth` falls through
+to the password field. **Nothing breaks and nothing ever shows a face.** The failure is safe,
+silent, and permanent.
+
+`sudo`, `su`, `login` and `sddm` all run their auth stack **as root**, so none of this touches
+them. The `sudo` trial is unaffected.
+
+### The options, and what each one costs
+
+**A — gate the socket on a group instead of on root.** `SocketGroup=` + `SocketMode=0660`,
+and `serve::handle` gains one rule: *a non-root peer may ask only about its own uid.* Roughly
+fifteen lines, a unit change, and the R2 wording in [03](03-pam-and-security.md).
+
+- What it opens: anything running as you — every app in your session — can turn the IR emitter
+  on and ask for a verdict about you, and can spend your failure budget (three denials and
+  face unlock is password-only until an `Op::Clear`).
+- What it does not open: no privilege is gained. A verdict on the socket authenticates nothing
+  by itself; PAM still decides, and the peer can only ever name itself.
+- This is roughly where `fprintd` already sits, reached from the other side: it is a root
+  D-Bus service and polkit lets any active local session call `Verify`.
+- Debian angle: the group needs a `sysusers.d` line and something that puts a human in it —
+  the KCM, or `pam-auth-update`'s postinst, or the admin by hand. That is a packaging decision
+  as much as a security one.
+
+**B — defer the leg, as P6-a was deferred.** The lock screen stays password-only; `sudo`,
+`su`, `login` and `sddm` carry face unlock. Phase 6's exit is rewritten to say so. Costs
+nothing and gives up the single most visible use of the product.
+
+**C — a privileged helper, the `unix_chkpwd` shape.** Moves the gate into a setgid binary
+instead of a group on the socket. The exposure is *the same* — any user may run the helper —
+and it adds a setuid-class binary to a project whose privilege split exists to avoid one.
+Listed so the option is on the record, not because it is a third answer.
+
+**Not deciding is choosing B**, and Phase 6 cannot close either way until this is answered.
+
+### Decided: A (P6-d)
+
+Shipped the same day. What actually changed is smaller than the framing suggests:
+
+| Where | Change |
+|---|---|
+| `data/systemd/faciolock.socket` | `SocketGroup=faciolock-auth`, `SocketMode=0660` |
+| `data/sysusers.d/faciolock.conf` | `g faciolock-auth -` — created empty; a human joins it when they enable face unlock |
+| `serve::may_ask` | the new R2, as a pure function: `peer_uid == 0 \|\| (peer_uid == subject && matches!(op, Auth \| Status))` |
+| `Daemon::answer` | consults it after resolving the uid; the old root check at `connect()` is gone |
+
+**The guarantee moved off the socket mode and onto `SO_PEERCRED`, which is the part worth
+saying.** Before, "only root may ask" was one wrong character in a unit file away from being
+untrue. Now the mode decides *who may open the socket* and the kernel decides *who they are*,
+so widening the mode widens the set of people who can ask about **themselves** — it cannot
+widen what any of them may ask. `Clear` and `Enroll` stay root-only by name, not by ceremony.
+
+`Clear` in particular: a session process that can reset its own failure counter has an
+unlimited supply of face attempts, and after [B24](11-bug-log.md#b24) the budget is the
+defence rather than a backstop behind liveness.
+
+### The knock-on, and it is not fixed: the lock screen cannot clear a spent budget
+
+`pam_sm_acct_mgmt` sends `Op::Clear` ([P4-b](README.md#decisions-taken)), and at the lock
+screen it runs as you, so it is refused. Combined with `Entry::locked` — `failures >= 3` with
+**no time decay** — the sequence is:
+
+> three faces refused at the lock screen (a dark room, a bad angle, glasses) → face unlock is
+> off → you type your password, which the daemon never hears about → face unlock is *still*
+> off, tomorrow morning too.
+
+It self-heals the moment anything authenticates through a **root** stack — one `sudo`, one
+`login`, one `sudo faciolockctl test` — and it never blocks anyone from their machine, because
+every refusal falls through to the password field. But "face unlock quietly stops working
+until you happen to run `sudo`" is a bad day for whoever hits it, and it is a consequence of
+this decision rather than something that predates it.
+
+Two cheap ways out, neither taken yet, both a change to what a lockout *means* rather than to
+who may ask:
+
+- **A successful `Auth` clears the counter.** Standard (`pam_faillock` does it), and an
+  attacker cannot produce the `Allow` that triggers it. Does not help the password path — the
+  case above still needs a `sudo`.
+- **The lockout decays.** `LockedOut` becomes another `BACKOFF` rung with a long duration
+  instead of a terminal state. Fixes the case above completely, and weakens the budget from
+  "three and it is over" to "three and it is over for N minutes".
+
+They are not the same trade and neither is obviously right, so they stay here rather than
+being decided in passing.

@@ -39,6 +39,37 @@ Consequences for us:
   unlock the screen.** Our installer must therefore never edit `/etc/pam.d/kde`
   directly — see below.
 
+### And none of it matters yet, because the greeter is not root (2026-08-31)
+
+Everything above is about what happens *after* `pam_faciolock.so` is reached. On this machine
+it is never reached at all.
+
+`kscreenlocker_greet` is `0755 root:root` — **not setuid** — links `libpam.so.0` directly, and
+is started by `kwin` inside the user's session. Plasma 6.6.5 ships **no `kcheckpass`**, no
+system D-Bus service and no polkit action for the screen locker; the password prompt works
+because `/usr/sbin/unix_chkpwd` is setgid `shadow`. So the whole `kde` stack, `common-auth`
+included, runs as uid 1000 — and `/run/faciolock.sock` is `0600 root:root` with a
+`SO_PEERCRED` root check behind it. `connect()` is `EACCES`, the module returns
+`PAM_AUTHINFO_UNAVAIL`, and the lock screen silently falls through to the password field
+forever.
+
+This is [P6-a](README.md#decisions-taken)'s wall reached from the other direction: a user
+session cannot talk to a root socket. `sudo`, `su`, `login` and `sddm` authenticate as root
+and are unaffected.
+
+**Resolved the same day, [P6-d](README.md#decisions-taken):** the socket is now `0660
+root:faciolock-auth` and the rule moved from the file mode onto `SO_PEERCRED` — root asks
+about anybody, anybody else asks about themselves and only `Auth`/`Status`. So the lock screen
+works **once you are in the group**, which is a deliberate second step and not part of the
+install:
+
+```bash
+sudo gpasswd -a $USER faciolock-auth
+```
+
+Group membership is read at session start, so it takes a log-out and back in. Until then the
+lock screen behaves exactly as it did before — `EACCES`, password field, nothing broken.
+
 ## Never hand-edit `/etc/pam.d/*`
 
 Debian/Ubuntu have a framework for this. Packages ship a profile in
@@ -109,7 +140,28 @@ a shell you already have.
 3.  pam-auth-update, all six                    <- supported, packaged, reversible
 ```
 
-### The single line, and what makes it safe
+**Walked 2026-08-31, and step 2 was skipped.** Step 1 worked first time — `sudo` authenticated
+by face with no password prompt — and the file was then restored from its backup rather than
+lived with, so step 3 followed the same afternoon. What `pam-auth-update --enable faciolock`
+generated:
+
+```text
+auth	[success=2 default=ignore]	pam_faciolock.so
+auth	[success=1 default=ignore]	pam_unix.so nullok try_first_pass
+auth	requisite			pam_deny.so
+auth	required			pam_permit.so
+```
+
+Two things worth reading rather than trusting. The jump arithmetic is right: a face success
+skips two lines to `pam_permit`, anything else falls to `pam_unix`, and `pam_unix`'s own
+`success=1` lands on the same `pam_permit`. And **`pam_unix` gained `try_first_pass`**, which
+pam-auth-update adds whenever a Primary module sits above it. That is harmless here for one
+specific reason: `pam_faciolock.so` never runs a PAM conversation, so there is no stashed
+password for `try_first_pass` to find and it prompts normally — observed. A future version
+that ever prompted for anything would change `pam_unix`'s behaviour without touching
+`pam_unix`.
+
+### The two lines, and what makes them safe
 
 Back the file up first — the undo below depends on it existing:
 
@@ -120,6 +172,23 @@ sudo cp /etc/pam.d/sudo /etc/pam.d/sudo.faciolock-backup
 ```
 auth	[success=end default=ignore]	pam_faciolock.so
 ```
+
+**This was one line until 2026-08-31, and one line has a slow leak.** It is the same omission
+[P6-b](README.md#decisions-taken) found in the shipped profile's sketch, arriving again in the
+by-hand trial: the auth line alone never calls `pam_sm_acct_mgmt`, which is where
+[P4-b](README.md#decisions-taken) put the lockout release. The failure budget is on disk and
+survives every idle-exit, so three refused faces during the trial — a dark room, a bad angle,
+the camera busy — disable face unlock for the rest of it, and the trial reads as "it stopped
+working" rather than "it is rate-limited, as designed". So the trial carries the account line
+too, above `@include common-account`:
+
+```
+account	optional	pam_faciolock.so
+```
+
+`optional` because the module returns `PAM_IGNORE` on every path by design. If the budget is
+already spent, `sudo faciolockctl test $USER` clears it on the way out (P5-c) without touching
+any PAM file.
 
 `default=ignore` is the whole recovery story. **Every** outcome that is not a success —
 daemon down, socket missing, not enrolled, rate-limited, refused, malformed reply, panic
