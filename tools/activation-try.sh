@@ -82,6 +82,17 @@ running() {
 	echo no
 }
 
+# The device fds our daemon holds. Same two filters as running(), for the same reasons.
+video_fds() {
+	for pid in $(pgrep -x faciolockd 2>/dev/null); do
+		if tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -qF "$run/faciolockd.toml"; then
+			ls -l "/proc/$pid/fd" 2>/dev/null | grep -c '/dev/video'
+			return
+		fi
+	done
+	echo 0
+}
+
 [ "$(id -u)" -eq 0 ] || { echo "needs root -- the socket is SO_PEERCRED-gated. try: sudo $0" >&2; exit 2; }
 [ -x "$daemon" ] || { echo "build it first:  cargo build" >&2; exit 2; }
 
@@ -133,6 +144,9 @@ echo
 first="$(ask status)"
 check "a request is answered" "NoEnrolment" "$first"
 check "the daemon is now up" "yes" "$(running)"
+# B29: activation used to warm the camera, so a status request lit the emitter for a full
+# idle window. wiki/11.
+check "and it did not take the camera to answer it" "0" "$(video_fds)"
 check "it knows the socket was inherited" "1" \
 	"$(grep -c 'socket-activated' "$run/log")"
 check "and it did not bind the path itself" "0" \
