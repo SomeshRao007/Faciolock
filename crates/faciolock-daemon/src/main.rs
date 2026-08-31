@@ -184,7 +184,14 @@ impl Daemon {
     pub fn answer(&self, req: &Request, peer: &Peer<'_>) -> Option<Verdict> {
         let user = req.username();
 
-        let Some(uid) = users::uid_of(user) else {
+        let subject = users::uid_of(user);
+
+        if !serve::may_ask(peer.uid(), subject, req.op) {
+            eprintln!("<4>faciolockd: refused {} — {:?} for {user:?}", peer.describe(), req.op);
+            return None;
+        }
+
+        let Some(uid) = subject else {
             return Some(Verdict::NoEnrolment);
         };
 

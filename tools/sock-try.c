@@ -95,7 +95,8 @@ int main(int argc, char **argv)
 	ssize_t n = read(fd, res, sizeof res);
 	if (n == 0) {
 		/* wiki/04 defines this as PAM_AUTHINFO_UNAVAIL on the caller's side. It is also
-		 * what a non-root peer gets: refused before the body is read, no reply at all. */
+		 * what `serve::may_ask` refuses with: asking about somebody else, or asking for
+		 * clear/enroll without being root, gets no reply at all rather than a Deny. */
 		printf("no reply (EOF) -- refused, or the daemon closed on us\n");
 		return 65;
 	}
