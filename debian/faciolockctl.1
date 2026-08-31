@@ -1,0 +1,113 @@
+.TH FACIOLOCKCTL 1 "2026-08-31" "faciolock 0.1.0" "User Commands"
+.SH NAME
+faciolockctl \- enrol, test and diagnose Faciolock face authentication
+.SH SYNOPSIS
+.B faciolockctl
+.RI [ --config " PATH" ]
+.I COMMAND
+.RI [ ARGS ]
+.SH DESCRIPTION
+.B faciolockctl
+is the administrative front end to
+.BR faciolockd (8).
+It talks to the daemon over
+.IR /run/faciolock.sock ;
+it holds no templates and does no inference of its own.
+.PP
+Every command except
+.B diagnose
+requires root, because the socket is mode 0660 and the template store is 0700.
+.I USER
+defaults to
+.BR $SUDO_USER ,
+so
+.B sudo faciolockctl enroll
+does the obvious thing.
+.SH COMMANDS
+.TP
+.BI diagnose " " [ --write ]
+Report what this machine has: which
+.I /dev/video*
+node is the infrared camera, what it delivers, and which emitter tier it is.
+With
+.BR --write ,
+record the result in
+.IR /etc/faciolock/faciolockd.toml .
+It refuses to overwrite an existing config rather than clobbering an
+administrator's file, so remove it first if you mean to re-run this.
+This is the only command that does not need root.
+.TP
+.BI enroll " " [ USER ]
+Guided enrolment. Three poses, prompted one at a time. Needs a room dark enough
+that the camera's own infrared emitter is what is lighting the face; see
+.B LIMITATIONS
+below.
+.B enrol
+is accepted as a spelling of this.
+.TP
+.B list
+Who is enrolled.
+.TP
+.BI remove " USER " [ --yes ]
+Delete an enrolment. Prompts unless
+.B --yes
+is given.
+.TP
+.BI test " " [ USER ]
+Perform exactly one authentication, asking the daemon the same question PAM
+would ask. This is the safe way to confirm the whole path works, because it
+touches no file under
+.IR /etc/pam.d .
+It also clears a spent failure budget on the way out.
+.TP
+.BI bench " " [ -n " N" "] [" USER ]
+Run N authentications and report p50, p95 and p99. The first sample is a
+warm-up and is not counted, because a cold daemon start would otherwise be the
+p99 at small N.
+.SH OPTIONS
+.TP
+.BI --config " PATH"
+Read the daemon configuration from
+.I PATH
+instead of
+.IR /etc/faciolock/faciolockd.toml .
+.TP
+.BR -h ", " --help
+Usage summary.
+.SH FILES
+.TP
+.I /etc/faciolock/faciolockd.toml
+Daemon configuration. Absent on a fresh install, and that is the designed state:
+both the daemon and this tool read its absence as "use the defaults".
+.TP
+.I /var/lib/faciolock/
+Encrypted templates, their key, the failure budget and the audit log. Mode 0700,
+owned by the
+.B faciolock
+system user.
+.TP
+.I /run/faciolock.sock
+The daemon's socket, mode 0660, group
+.BR faciolock-auth .
+.SH LIMITATIONS
+Two are measured rather than suspected, and both ship with this version.
+.PP
+In bright daylight, ambient infrared saturates the statistics the liveness
+checks are built on, so honest captures are rejected and authentication falls
+through to a password. It fails closed rather than open.
+.PP
+A flat printed photograph is not reliably rejected. There is currently no
+enforced liveness check that separates a print from a live face.
+.PP
+Face authentication is a convenience factor, not a password replacement.
+.SH EXIT STATUS
+0 on success, non-zero on failure. A refused face is a failure.
+.SH SEE ALSO
+.BR pam_faciolock (8),
+.BR pam-auth-update (8),
+.BR sysusers.d (5)
+.PP
+.I /usr/share/doc/faciolock/README.Debian
+for setup, and
+.I /usr/share/doc/libpam-faciolock/README.Debian
+for enabling face authentication and for the recovery path if it misbehaves.

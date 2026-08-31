@@ -31,6 +31,11 @@ SocketMode=0660
 # One fd, handed whole to one long-lived process. Accept=yes would fork per connection,
 # which is a camera per connection.
 Accept=no
+# systemd does not unlink the socket file when the unit stops -- RemoveOnStop=
+# defaults to no -- so removing the package left /run/faciolock.sock behind with
+# nothing listening on it. It clears at reboot and systemd rebinds over it, so
+# nothing breaks; it is still a file the uninstall did not take with it.
+RemoveOnStop=yes
 # FlushPending= is deliberately absent (P6-f). A daemon that cannot start never drains the
 # connection that activated it, so systemd reactivates into the same failure until
 # StartLimitBurst fails this unit. FlushPending=yes stops that — and also drops the honest

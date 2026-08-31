@@ -88,3 +88,20 @@ yes.pub
 # Python bytecode from the throwaway spikes.
 __pycache__/
 *.pyc
+
+# Vendored crate tree, ~194 MB. Generated into a build copy by
+# tools/mk-source-package.sh because Launchpad's builders have no network; it
+# has no business in the repository.
+/vendor/
+/.cargo/config.toml
+
+# debhelper staging.
+debian/.debhelper/
+debian/cargo-home/
+debian/files
+debian/*.substvars
+debian/*.debhelper.log
+debian/faciolock/
+debian/faciolock-models/
+debian/libpam-faciolock/
+debian/tmp/

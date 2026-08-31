@@ -1,0 +1,3 @@
+data/systemd/faciolock.socket    usr/lib/systemd/system/
+data/systemd/faciolock.service   usr/lib/systemd/system/
+data/polkit/org.faciolock.policy usr/share/polkit-1/actions/
