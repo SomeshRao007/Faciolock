@@ -75,6 +75,12 @@ Two properties that had to be built rather than configured:
 - **An enrolment in flight blocks the exit.** `ENROL_EXPIRY` is 60 s against a default idle
   of 30, so somebody fetching their glasses between poses is the ordinary case. A `Pending`
   lives in the process's memory and nowhere else.
+- **A daemon that cannot start still answers the queue** ([P6-f](README.md#decisions-taken)).
+  The connection *is* the activation, so exiting without accepting it means systemd starts the
+  same failure again, and again, until `StartLimitBurst` fails the socket unit. `main` takes
+  the inherited fd before it loads anything, and a failed `start()` accepts and closes what is
+  waiting: one password prompt instead of a flap, and the journal keeps the real error rather
+  than `start-limit-hit`.
 
 ### The pre-warm agent does not work as specified, and it is deferred (P6-a)
 

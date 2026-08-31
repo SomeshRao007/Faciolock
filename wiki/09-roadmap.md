@@ -544,6 +544,38 @@ refused faces there turn face unlock off until a `sudo` or a `login` clears it. 
 with the two candidate fixes at
 [Q10](08-open-questions.md#the-knock-on-and-it-is-not-fixed-the-lock-screen-cannot-clear-a-spent-budget).
 
+### A daemon that cannot start must still answer the doorbell (P6-f)
+
+The last decision of the phase. Under socket activation the *connection* is what starts the
+service, so a daemon that refuses to start — bad tier, a model that fails its SHA256 after an
+upgrade, an unparseable config — leaves that connection queued when it exits. systemd sees a
+queued connection and starts it again. Same failure, same connection, until `StartLimitBurst`
+fails the socket unit; face auth is then dead until somebody runs `systemctl reset-failed`,
+and the journal says `start-limit-hit` rather than what actually broke.
+
+`FlushPending=yes` on the socket unit is one line and would end it, but it is a property of
+the *socket*, and the socket cannot tell "the daemon is broken" from "the daemon just took its
+scheduled idle-exit". It would also drop the honest connection that races an idle-exit, which
+today the next activation serves without anybody noticing.
+
+**The daemon can tell the difference, so the drain lives there.** `serve::inherited()` moved
+ahead of `start()` — the failure path needs a socket to answer on — and a failed start accepts
+and closes whatever is waiting. Closing rather than replying is deliberate: the module reads
+EOF and a `Verdict::Unavailable` as the same `PAM_AUTHINFO_UNAVAIL`, and one of the two is
+free.
+
+Measured through `systemd-socket-activate` against a config pointing at a models directory
+that does not exist:
+
+```text
+client: got 0 bytes after 6 ms  -> EOF, connection closed
+faciolockd: closed 1 waiting request(s) before exiting; they fall through to a password
+faciolockd: …/no-such-models/MANIFEST.sha256: No such file or directory (os error 2)
+```
+
+Six milliseconds to a password prompt, rather than waiting out the module's 3 s deadline —
+the fall-through got *faster* as well as quieter.
+
 ### Enabling the profile turned the camera into a cron job (P6-e)
 
 The first thing the `pam-auth-update` profile did, one day in, was light the IR emitter three
@@ -588,6 +620,7 @@ prompt has never been watched end to end — plus the `FlushPending=` decision b
 | **A face the daemon cannot judge still lets you in with a password** | **observed 2026-08-31, through `pam-auth-update` rather than the by-hand file.** `sudo -K; sudo true` at a covered lens: a password prompt, and the journal names the path — `auth uid=1000 verdict=Unavailable reason=ambient floor=1.31 live=pass probes=0 elapsed=1782 counted=0`. `default=ignore` watched end to end for the first time instead of argued from Phase 3's table. **`counted=0` is the second half of it**: nothing that never saw a face moved the budget, so P2-g's exemption held under a real `sudo` |
 | **A face that is looked at and *refused* still lets you in with a password** | **still not observed.** The run above went `Unavailable`, not `Deny` — the question was never asked, so this is the neighbouring path rather than this one. `default=ignore` treats them identically and Phase 3 observed the return code, but the `Deny` fall-through has never been watched end to end. It needs a face the camera can judge and a face that is not the enrolled one — after dark, alongside the other two |
 | Enabling it does not break the password path for every other service | **observed** — `pam-auth-update --enable faciolock` generated `auth [success=2 default=ignore] pam_faciolock.so` above `pam_unix`, and the arithmetic is right: a face success jumps to `pam_permit`, anything else falls to `pam_unix`, whose own `success=1` lands on the same `pam_permit`. It also rewrote `pam_unix` to `try_first_pass`, which is benign **only because our module never runs a conversation** — it stashes no password, so `try_first_pass` finds none and prompts. A future version that ever prompted would silently change `pam_unix`'s behaviour |
+| **A broken daemon does not flap the socket unit** | **observed 2026-08-31** ([P6-f](README.md#decisions-taken)). Under `systemd-socket-activate` with `models` pointing at a directory that does not exist: the queued request was accepted and closed on the way out, the client saw **EOF in 6 ms**, and the journal names the real cause instead of `start-limit-hit`. Held by a unit test that queues two clients on a real listener, drains, and asserts both see the connection go, the second drain finds nothing, and the socket reads idle — the test fails if `drain` is stubbed out |
 | **`faciolockctl bench` against the release daemon** | **observed 2026-08-31, and it closes a caveat open since Phase 1.** 20/20 allowed, **p50 540 ms, p95 543, p99 556, min 522, max 556** — 34 ms of spread across the whole run. The daemon's own audit log gives p50 540 for the same samples, so IPC and the peer check cost under a millisecond. [B28](11-bug-log.md#b28)'s warm-up held: the 590 ms first sample and the `sudo`'s own cold 1,981 ms are both outside the distribution. **It also contradicts [06](06-performance-budget.md#the-first-end-to-end-measurement-and-it-does-not-agree-with-the-table)'s stage table by 133 ms in the fast direction, which is arithmetically impossible** — 6 frames at 14.7 fps is 340 ms of sensor time alone — so one of the two is measuring something other than its label. Open, and neither number is quotable until the burst is timed inside the daemon |
 | **A face login through a display manager** | **observed 2026-08-31 — the first one this project has done.** SDDM, `similarity=0.840`, and the face check and `session opened for user csr` share pid 17672, so they are one `pam_authenticate()`. What it also showed is that the *moment* is the greeter's: SDDM called PAM 10 s after the login screen appeared, when the password was submitted, so the face ran after the typing rather than instead of it — and `[success=2]` then jumped over `pam_unix`, meaning **the submitted password was never checked**. Not our stack order, not fixable from a module: [07](07-desktop-and-packaging.md#when-the-face-check-runs-is-the-greeters-decision-not-ours) |
 | **The camera is not touched by an activation that does not need it** | **observed 2026-08-31, on the patched binary and against the machine's own journal.** [B29](11-bug-log.md#b29): with the profile enabled, cron's account stack activated the daemon three times an hour and each activation warmed the camera for a full idle window — `17:09:01`, `17:17:01`, `17:30:01`, each followed by `camera warm … 336 ms`. With the warm deleted, the daemon was started self-bound on a scratch socket, left listening for 2 s and its `/proc/PID/fd` read: **one socket, `/dev/null`, the log, and no `/dev/video*` at all**, where the old binary opened the device 1–2 s after `Started` (model load first) and then held it for the whole idle window. `activation-try.sh` PART 2 now asserts the same count under real activation; that run needs root and the installed socket stopped. **Then confirmed on the installed daemon**: reinstalled 18:39, six activations since, zero `camera warm` lines, including the `19:09:01` cron tick that had lit the emitter at `17:09:01` |
