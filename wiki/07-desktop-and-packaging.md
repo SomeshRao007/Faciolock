@@ -102,15 +102,41 @@ runs. Any string in that field, followed by a face that matches, is a successful
 is the intended meaning of a sufficient factor rather than a defect — but it is what the
 sequence above actually did, and nobody should discover it by accident.
 
-Whether the **lock screen** behaves the same way is a separate question and is not yet
-answered. `kscreenlocker_greet` drives PAM's conversation from the moment the lock screen
-appears — that is how `pam_fprintd` displays "swipe your finger" with no keystroke — so face
-may well fire there before anything is typed. Untested: this machine has no `pam_fprintd`
-configured, and the lock screen has not been tried since the group was granted. One `Meta+L`
-after dark answers it.
-
 This is also the honest ceiling on what a face-unlock module can promise on a desktop: **the
 module decides the verdict, the greeter decides the moment.** Howdy sits behind the same wall.
+
+### The lock screen does not wait to be typed at, and that is the whole difference (2026-08-31)
+
+Measured the same evening, and it is the opposite of SDDM. A trackpad touch woke the lock
+screen and it unlocked with **no keystroke at all**:
+
+```text
+19:20:31  Started faciolock.service                    <- the wake activated it
+19:20:31  kscreenlocker_greet[21264]: kde-fingerprint:auth …
+19:20:33  faciolockd: auth uid=1000 verdict=Allow similarity=0.873 pid 21264 uid 1000
+19:20:33  kscreenlocker_greet[21264]: kde:auth … setcred                <- unlocked
+```
+
+KDE starts its stacks when the greeter *wakes*, not when a field is submitted — the multi-stack
+design described at the top of this page, running `kde`, `kde-fingerprint` and `kde-smartcard`
+concurrently so a biometric can win before anyone types. `common-auth` is inside the `kde`
+stack, so we are simply one of the racers. The UI shows a small **Unlock** button rather than a
+bare password field while a non-password stack is live.
+
+Two details worth keeping:
+
+- **We run once per unlock, not once per stack.** Only `/usr/lib/pam.d/kde` `@include`s
+  `common-auth`; `kde-fingerprint` calls `pam_fprintd.so` directly and `kde-smartcard` its own
+  module. Had all three included it, one trackpad touch would have queued three camera bursts
+  at a daemon that serves them one at a time.
+- **`pid 21264 uid 1000`** in the daemon's audit line is the entire point of
+  [P6-d](README.md#decisions-taken): an unprivileged session process asking about itself and
+  being answered. Two days earlier the same call was `EACCES`.
+
+So the moment is the greeter's, and the two greeters on this machine chose differently:
+**SDDM asks PAM when you submit, KDE's lock screen asks on wake.** Neither is configurable
+from our side, and the difference is worth stating in the README before a user concludes the
+module is broken at one of them.
 
 ## Never hand-edit `/etc/pam.d/*`
 
