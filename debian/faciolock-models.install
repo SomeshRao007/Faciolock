@@ -1,0 +1,3 @@
+models/face_detection_yunet_2026may.onnx   usr/share/faciolock/models/
+models/face_recognition_sface_2021dec.onnx usr/share/faciolock/models/
+models/MANIFEST.sha256                     usr/share/faciolock/models/

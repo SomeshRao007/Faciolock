@@ -1,0 +1,74 @@
+faciolock for Debian and Ubuntu
+===============================
+
+Installing this package does not enable face authentication. Nothing
+authenticates by face until you install libpam-faciolock and run
+pam-auth-update, and that is a separate, deliberate step with its own recovery
+path -- see /usr/share/doc/libpam-faciolock/README.Debian.
+
+Setting it up
+-------------
+
+The daemon is socket-activated: /run/faciolock.sock exists from boot, nothing
+runs behind it, and the first connection starts faciolockd. It exits again
+after 30 idle seconds, so an unused machine carries no resident face daemon.
+
+  1. Find the camera and record which tier your hardware is:
+
+       sudo faciolockctl diagnose --write
+
+     This picks the IR node -- not the RGB one, and not the metadata nodes that
+     sit beside it -- and writes /etc/faciolock/faciolockd.toml. The package
+     deliberately ships no config file: diagnose refuses to overwrite one that
+     already exists, so a placeholder would permanently break this command.
+
+  2. Enrol. Three poses, in a room dark enough that the IR emitter is what is
+     lighting your face:
+
+       sudo faciolockctl enroll $USER
+
+  3. Test it without touching any PAM file at all:
+
+       sudo faciolockctl test $USER
+
+  4. For anything that authenticates inside your own desktop session -- the KDE
+     lock screen above all -- join the group the socket is gated on, then log
+     out and back in:
+
+       sudo gpasswd -a $USER faciolock-auth
+
+     A package cannot do this for you: which humans may ask the daemon about
+     themselves is an administrator's decision, not an installer's. Without it
+     the lock screen falls through to the password field silently and forever.
+
+What this will not do
+---------------------
+
+Face authentication is a convenience factor, not a password replacement. A
+password stays reachable on every path, and every failure mode -- daemon down,
+not enrolled, rate-limited, refused -- falls through to it.
+
+Two limitations at this version are measured rather than suspected:
+
+  * In bright daylight the ambient-infrared floor rejects honest captures, so
+    face authentication refuses and you type your password. Enabling the PAM
+    profile in a sunlit room buys nothing and costs a second or two per sudo.
+
+  * A printed photograph is not reliably rejected by the liveness checks. The
+    published bar for this project is the same one Windows Hello sits at: a
+    purpose-built artefact defeats it. If you need a second factor that resists
+    a motivated attacker, use a hardware token.
+
+Both are tracked in the bug log shipped with this package.
+
+Removing it
+-----------
+
+Purging faciolock leaves your enrolment and its encryption key behind in
+/var/lib/faciolock, on purpose -- a package that deletes biometric templates on
+an upgrade gone sideways is a package that costs you a re-enrolment. Remove
+them yourself when you mean it:
+
+  sudo rm -rf /var/lib/faciolock /etc/faciolock
+
+ -- Somesh Rao <cokasomeshrao@outlook.com>
