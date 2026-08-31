@@ -1,0 +1,13 @@
+faciolock (0.1.0~ppa1) resolute; urgency=medium
+
+  * Initial release. Phase 7 of the roadmap; the first packaged build.
+  * Three binary packages: faciolock (daemon, CLI, units), libpam-faciolock
+    (the module and its pam-auth-update profile), faciolock-models (weights).
+  * Face authentication ships disabled. The profile registers at
+    "Default: no", so pam-auth-update leaves every stack untouched until an
+    administrator enables it.
+  * Known limitations at this version, both measured rather than suspected:
+    face authentication refuses in bright daylight (wiki B18), and a printed
+    face is not reliably rejected by the liveness checks (wiki B24).
+
+ -- Somesh Rao <cokasomeshrao@outlook.com>  Mon, 31 Aug 2026 19:57:01 +0530
