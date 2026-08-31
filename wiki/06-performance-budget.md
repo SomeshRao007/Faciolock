@@ -68,6 +68,60 @@ SFace is **58%** of the budget and the frame burst 33%. If it ever misses, the e
 the lever: a smaller detector input is now known to cost accuracy rather than buy time
 cheaply, so it is not the first thing to reach for.
 
+### The first end-to-end measurement, and it does not agree with the table (2026-08-31)
+
+Caveat 1 above has been outstanding since Phase 1: *"a real p95 for the whole path needs
+`faciolockctl bench`"*. It ran, against the installed release daemon, on the reference
+machine, after dark, 20 authentications:
+
+```text
+  20/20 allowed
+  p50  540 ms      p95  543 ms      p99  556 ms
+  min  522 ms      max  556 ms
+```
+
+Client round-trip, `connect()` to verdict, through the same `Op::Auth` PAM uses. The daemon's
+own audit log for the same 20 samples reads p50 **540 ms** — so the IPC, the peer check and
+the response cost **under a millisecond**, and the two independent clocks agree. The
+unmeasured warm-up that starts the daemon cost 590 ms; the `sudo` that launched `bench` paid
+the full cold **1,981 ms** ([B28](11-bug-log.md#b28) working as intended — no cold sample
+inside the distribution).
+
+The distribution is remarkably tight: **34 ms** between min and max across 20 trials, which is
+a pipeline with no stalls in it.
+
+**And it is 133 ms faster than this page's own stage table, which cannot be right.**
+
+| | ms |
+|---|---|
+| Stage table, summed | 673 |
+| `bench`, measured p50 | **540** |
+
+The sum is not merely pessimistic — it is *arithmetically incompatible* with the measurement.
+Six frames at the delivered 14.7 fps ([B19](11-bug-log.md#b19)) span **340 ms of sensor time
+before any code runs**, and the table prices detection and three SFace passes at **265 ms**.
+That is 605 ms of floor for a 540 ms result. Something measured here is not what it was
+labelled.
+
+Two candidates, neither verified:
+
+- **The frame rate is not 14.7 fps under IR strobe at night.** UVC cameras trade frame rate
+  for exposure, and B19's figure was taken in one lighting condition. A brightly-lit-by-its-
+  own-emitter sensor may well deliver faster, which would shorten the burst directly.
+- **SFace is not 76.9 ms in the installed daemon.** The stage figures come from
+  `warm_path_stage_latency` inside the test harness; the daemon is a release build with
+  different surroundings.
+
+Resolving it needs the burst timed *inside the daemon* rather than inferred by subtraction —
+the `CapturedBurst` already carries `sensor_span()`, so this is a log line and not a project.
+**Until then neither number should be quoted as the warm-path cost**, and this project has
+already logged [B11](11-bug-log.md#b11), [B15](11-bug-log.md#b15) and
+[B19](11-bug-log.md#b19) for exactly this shape of mistake.
+
+What is safe to say: **the warm path is 540 ms p50 end to end, it misses the 400 ms target by
+1.35×, and it is 2–3× better than Howdy's cold start on every attempt rather than on the
+lucky ones.**
+
 ### The 85 ms → 76.9 ms correction
 
 The previous table carried SFace at 85 ms from the Phase 0 spike. Re-measured on the same

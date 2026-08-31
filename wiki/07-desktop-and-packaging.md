@@ -70,6 +70,48 @@ sudo gpasswd -a $USER faciolock-auth
 Group membership is read at session start, so it takes a log-out and back in. Until then the
 lock screen behaves exactly as it did before — `EACCES`, password field, nothing broken.
 
+### When the face check runs is the greeter's decision, not ours (2026-08-31)
+
+The first face login through a display manager happened on the log-out-and-back-in above, and
+it did not look the way anyone expects:
+
+```text
+18:42:09  sddm-helper: pam_unix(sddm-greeter:session): session opened for sddm
+18:42:19  faciolockd: auth uid=1000 verdict=Allow similarity=0.840 pid 17672
+18:42:19  sddm-helper[17672]: pam_unix(sddm:session): session opened for user csr
+```
+
+Ten seconds between the login screen appearing and the camera being consulted — **and the
+camera was consulted only because the password had just been submitted.** Same pid on the
+face check and the session, so both are one `pam_authenticate()` call.
+
+**This is not our stack order.** `pam_faciolock.so` is the Primary entry in `common-auth`, above
+`pam_unix`, and it does run first *within* the stack. What is late is the stack itself: PAM is
+a pull API, and SDDM's greeter collects the password field before handing it to `sddm-helper`,
+which is the thing that calls `pam_authenticate()`. No module can ask to be started earlier;
+there is no PAM entry point that means "begin now, nobody has typed anything".
+
+`sudo` is the contrast and it is the same module: `sudo` calls `pam_authenticate()`
+immediately, and the password prompt a user thinks of as "sudo asking" is actually
+`pam_unix`'s *conversation*, further down the stack. Face reaches the daemon before
+`pam_unix` ever speaks, which is why the 2026-08-31 trial returned with no prompt at all.
+
+**The consequence worth stating plainly: when the face wins at SDDM, the password that was
+typed is never checked.** `[success=2]` jumps over `pam_unix`, so its `try_first_pass` never
+runs. Any string in that field, followed by a face that matches, is a successful login. That
+is the intended meaning of a sufficient factor rather than a defect — but it is what the
+sequence above actually did, and nobody should discover it by accident.
+
+Whether the **lock screen** behaves the same way is a separate question and is not yet
+answered. `kscreenlocker_greet` drives PAM's conversation from the moment the lock screen
+appears — that is how `pam_fprintd` displays "swipe your finger" with no keystroke — so face
+may well fire there before anything is typed. Untested: this machine has no `pam_fprintd`
+configured, and the lock screen has not been tried since the group was granted. One `Meta+L`
+after dark answers it.
+
+This is also the honest ceiling on what a face-unlock module can promise on a desktop: **the
+module decides the verdict, the greeter decides the moment.** Howdy sits behind the same wall.
+
 ## Never hand-edit `/etc/pam.d/*`
 
 Debian/Ubuntu have a framework for this. Packages ship a profile in

@@ -104,6 +104,11 @@ patched binary self-bound on a scratch socket, left listening for two seconds, h
 /proc/PID/fd:  socket:[84481]   /dev/null   the log   (and nothing else)
 ```
 
+**Confirmed on the installed daemon 2026-08-31**, and by the same cron job that reported it.
+`/usr/libexec/faciolock/faciolockd` replaced at 18:39; since then **six activations, zero
+`camera warm` lines** — including `19:09:01`, the `phpsessionclean` tick that had lit the
+emitter at `17:09:01` two hours earlier. Same trigger, same socket, no camera.
+
 Zero `/dev/video*`. The old binary opened the device **1–2 s after `Started`** — model load and
 the 39 MB SHA256 come first, then the warm thread — and then held it until the process exited.
 The `336 ms` in the journal line is the burst *span*, not the time to the open, and not the
