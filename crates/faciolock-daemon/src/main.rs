@@ -41,9 +41,25 @@ fn main() -> ExitCode {
         }
     }
 
+    let inherited = match serve::inherited() {
+        Ok(l) => l,
+        Err(e) => return fail(&e),
+    };
+
     match start(&config_path) {
-        Ok(daemon) => daemon.serve(),
-        Err(e) => fail(&e),
+        Ok(daemon) => daemon.serve(inherited),
+        Err(e) => {
+            if let Some(listener) = &inherited {
+                let closed = serve::drain(listener);
+                if closed > 0 {
+                    eprintln!(
+                        "faciolockd: closed {closed} waiting request(s) before exiting; \
+                         they fall through to a password"
+                    );
+                }
+            }
+            fail(&e)
+        }
     }
 }
 
@@ -142,14 +158,13 @@ impl Daemon {
         may_exit(pending_of(self).as_ref())
     }
 
-    fn serve(self) -> ExitCode {
-        let (listener, ours) = match serve::inherited() {
-            Ok(Some(l)) => (l, false),
-            Ok(None) => match serve::listen(&self.cfg.socket) {
+    fn serve(self, inherited: Option<std::os::unix::net::UnixListener>) -> ExitCode {
+        let (listener, ours) = match inherited {
+            Some(l) => (l, false),
+            None => match serve::listen(&self.cfg.socket) {
                 Ok(l) => (l, true),
                 Err(e) => return fail(&e),
             },
-            Err(e) => return fail(&e),
         };
         let idle = if ours { None } else { self.cfg.idle_timeout() };
         eprintln!(
