@@ -8,7 +8,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::Instant;
 
-use faciolock_ipc::{REQUEST_MAX, Request, Response, Verdict};
+use faciolock_ipc::{Op, REQUEST_MAX, Request, Response, Verdict};
 
 use crate::Daemon;
 
@@ -210,8 +210,8 @@ impl<'a> Peer<'a> {
         Ok(Peer { stream, uid: cred.uid, pid: cred.pid })
     }
 
-    fn is_root(&self) -> bool {
-        self.uid == 0
+    pub fn uid(&self) -> u32 {
+        self.uid
     }
 
     // ponytail: stage boundaries only, see wiki/14
@@ -240,10 +240,6 @@ fn handle(stream: UnixStream, daemon: &Daemon) {
             return;
         }
     };
-    if !peer.is_root() {
-        eprintln!("faciolockd: refused {} — only root may ask", peer.describe());
-        return;
-    }
     if let Err(e) = stream
         .set_read_timeout(Some(PEER_IO_TIMEOUT))
         .and_then(|()| stream.set_write_timeout(Some(PEER_IO_TIMEOUT)))
@@ -291,6 +287,20 @@ pub fn to_wire(verdict: &faciolock_vision::Verdict) -> Verdict {
     }
 }
 
+// wiki/03 R2, second form (P6-d). The old rule was "only root may ask" and it lived at
+// connect(); it cannot stay there, because the KDE greeter that has to ask is not root.
+//
+// Root asks about anybody. Anybody else asks only about themselves, and only the two
+// questions that cannot move the budget in their favour: Clear would hand a session process
+// an unlimited supply of face attempts, and Enroll would let one write a template.
+//
+// `subject` is None when the username did not resolve, and that case belongs in here rather
+// than in the caller: answered separately it is a user-existence oracle, because "no such
+// user" would come back as NoEnrolment where a real other user comes back as silence.
+pub fn may_ask(peer_uid: u32, subject: Option<u32>, op: Op) -> bool {
+    peer_uid == 0 || (subject == Some(peer_uid) && matches!(op, Op::Auth | Op::Status))
+}
+
 pub fn status(enrolled: bool) -> Verdict {
     if enrolled { Verdict::Deny } else { Verdict::NoEnrolment }
 }
@@ -324,6 +334,32 @@ mod tests {
         }
         assert!(!status(true).is_allow(), "Status must never grant");
         assert!(!status(false).is_allow());
+    }
+
+    #[test]
+    fn a_session_peer_may_ask_about_itself_and_nothing_else() {
+        const ME: u32 = 1000;
+        const SOMEBODY_ELSE: u32 = 1001;
+
+        for op in [Op::Auth, Op::Status, Op::Enroll, Op::Clear] {
+            assert!(may_ask(0, Some(SOMEBODY_ELSE), op), "root asks about anybody: {op:?}");
+            assert!(may_ask(0, None, op), "root still gets NoEnrolment for a bad name: {op:?}");
+            assert!(!may_ask(ME, Some(SOMEBODY_ELSE), op), "{ME} must not reach 1001: {op:?}");
+            assert!(!may_ask(ME, Some(0), op), "uid {ME} must not reach root: {op:?}");
+
+            // Or the socket is a user-existence oracle: silence for a real account you may
+            // not ask about, NoEnrolment for one that does not exist.
+            assert!(!may_ask(ME, None, op), "an unknown name must not answer either: {op:?}");
+        }
+
+        assert!(may_ask(ME, Some(ME), Op::Auth), "the lock screen's own question");
+        assert!(may_ask(ME, Some(ME), Op::Status));
+
+        // The two that would make the failure budget worthless. Clear is the sharp one: a
+        // session process that can reset its own counter has unlimited face attempts, and
+        // after B24 the budget is the defence rather than a backstop behind liveness.
+        assert!(!may_ask(ME, Some(ME), Op::Clear), "clearing your own budget defeats the limiter");
+        assert!(!may_ask(ME, Some(ME), Op::Enroll), "a session process must not write a template");
     }
 
     #[test]
@@ -483,7 +519,7 @@ mod tests {
         let (server, _) = listener.accept().expect("accept");
         let peer = Peer::of(&server).expect("SO_PEERCRED");
         assert_eq!(peer.uid, unsafe { libc::getuid() }, "the kernel reports the real peer");
-        assert!(!peer.is_root(), "an unprivileged peer must be refused");
+        assert!(!may_ask(peer.uid(), Some(0), Op::Auth), "an unprivileged peer cannot reach root");
 
         assert!(!peer.hung_up(), "the client is still connected");
         drop(client);
