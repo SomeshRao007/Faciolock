@@ -630,17 +630,123 @@ prompt has never been watched end to end — plus the `FlushPending=` decision b
 
 ## Phase 7 — Packaging & release (week 8)
 
-- Four binary packages ([07](07-desktop-and-packaging.md#packaging-plan))
-- `/usr/share/pam-configs/faciolock`, `Default: no`, `Priority: 512`
-- Reproducible builds
-- README with the security ceiling stated as plainly as Howdy states theirs
-- Hardware compatibility list, seeded with the reference machine
-- Documented recovery path if the module misbehaves
-- Security policy / CVE contact
-- **PPA release**
+**Started 2026-08-31**, the same day Phase 6 closed. One decision taken before any file was
+written, because it blocked every other one.
 
-**Exit:** clean install on a fresh Kubuntu VM, enrol, unlock, uninstall — no manual
+- ~~Four binary packages~~ — **three** ([07](07-desktop-and-packaging.md#packaging-plan)).
+  `plasma-faciolock-kcm` is marked "(later)" in the same table that lists it and is not
+  part of v1
+- `/usr/share/pam-configs/faciolock`, `Default: no`, `Priority: 512` — **already correct
+  since Phase 6**; this phase only ships it
+- Reproducible builds — `SOURCE_DATE_EPOCH` from the changelog, `--locked`, vendored
+  sources. Not yet verified by building twice
+- README with the security ceiling stated as plainly as Howdy states theirs — **done**,
+  and it grew two entries rather than losing any
+- Hardware compatibility list, seeded with the reference machine —
+  **[15](15-hardware-compatibility.md)**, one row
+- Documented recovery path if the module misbehaves — **done**, as
+  `libpam-faciolock`'s `README.Debian`, so it arrives with the package rather than living
+  in a wiki nobody installs
+- Security policy / CVE contact — **`SECURITY.md`**, with an out-of-scope section that
+  names B24 and B18 as known limitations rather than waiting to be told
+- **PPA release** — not started. Needs a Launchpad account and a signing key, which is the
+  operator's to hold
+
+### The project had no licence, and that had to be settled first (P7-a)
+
+`README.md` said "Not yet chosen — until a `LICENSE` file exists, no licence is granted",
+and it had said so since Phase 0. That is a defensible position for a repository nobody can
+install and an impossible one for a package: `debian/copyright` has nowhere to start, and
+uploading unlicensed source to a PPA is not a thing you may do.
+
+**GPL-3.0-or-later**, decided with the operator. The argument that carried it is that this
+is a system authentication component rather than a library: a vendor shipping a modified
+`faciolockd` on a laptop line should have to publish what they changed, and a silently
+forked biometric daemon is a worse outcome than the friction GPL-3 adds. Nothing in the
+tree objects — all 156 vendored crates are MIT/Apache-2.0 or another permissive licence,
+including the one MPL-2.0 and the two BSD-3-Clause, and MPL-2.0 is explicitly
+GPL-compatible.
+
+### Vendoring, and why not `dh-cargo` (P7-b)
+
+Launchpad's build machines have no network. Every crate must therefore be *inside* the
+source package before it is uploaded, and there are two ways to arrange that:
+
+| | `dh-cargo` | Vendored tree |
+|---|---|---|
+| What it needs | a `librust-*-dev` source package for each of 156 crates | one `cargo vendor` run |
+| Where it leads | the Debian archive | a PPA today |
+| Cost | months of packaging other people's crates | a ~194 MB source package |
+
+[Q6](08-open-questions.md#q6--target-debian-archive-or-ppa-and-see--decided-archive) picked
+the archive as the *goal* and the risk register has said "PPA first regardless" since it was
+written. So the vendored tree, and `tools/mk-source-package.sh` is what assembles it: copy
+what git tracks plus the gitignored models, `cargo vendor` into the copy, build there.
+`vendor/` never enters the repository, and `fuzz/` and `spikes/` stay out of the tarball
+for free by not being tracked as workspace source — which matters more than it sounds,
+because `libfuzzer-sys` reaching the lockfile would break the dependency-tree assertion
+that Phase 3 rests on.
+
+`3.0 (native)` rather than `3.0 (quilt)`: there is no upstream/downstream split to model
+here, and a native package is one tarball instead of three files to keep in step.
+
+### The models are gitignored, and the tarball needs them
+
+38 MB of weights that `.gitignore` has excluded since Phase 0, and `faciolock-models`
+cannot be built without them. `mk-source-package.sh` copies them in explicitly rather than
+the repository changing its mind about tracking binaries.
+
+**Exit:** ~~clean install on a fresh Kubuntu VM~~ — **on the reference machine, at the
+operator's instruction (2026-08-31).** Install, enrol, unlock, uninstall, with no manual
 `/etc/pam.d` editing at any point.
+
+What the VM was for was a machine with no history: no `faciolock` user, no
+`/var/lib/faciolock`, no group membership, nothing the hand-install left behind. This
+machine has all four, so **the install half is a weaker test than the exit criterion asked
+for** — a first-install failure to create the user could not show up here, because the user
+already existed. That is exactly the failure [B31](11-bug-log.md#b31) would have been, which
+is why it was worth catching by reading the generated postinst rather than by running an
+install. The removal half is unaffected and is the stronger half of the two.
+
+**Status: exit met, 2026-08-31 23:02:00.** Install → enrol → **unlock** → uninstall, all four
+legs on the reference machine, with no `/etc/pam.d` edited by hand at any point: the profile
+was enabled by `pam-auth-update` and un-enabled by the `prerm`. The three packages build,
+both `lintian` runs are clean, and packaging found five defects that nothing else in this
+project could have found — three before any install, one by the purge, and the silent one is
+the one worth reading ([B30](11-bug-log.md#b30), [B31](11-bug-log.md#b31)).
+
+**What is still open is the release, not the packaging:** the PPA upload needs a Launchpad
+account and a signing key, which are the operator's to hold.
+
+| Leg | State |
+|---|---|
+| Three packages build | **observed** — `faciolock`, `libpam-faciolock`, `faciolock-models`, plus two `-dbgsym` from `dh_strip` |
+| `lintian` clean on the **binary** packages | **observed** — zero errors, zero warnings. The one warning it did raise, `no-manual-page`, is closed by `faciolockctl.1` |
+| `lintian` clean on the **source** package | **not clean on the first run, and the distinction matters** — the binary `.changes` and the source `.changes` are different runs, and only the second one sees `vendor/`. Three findings, three different dispositions. *Fixed:* a DEP-5 `License:` line naming licences with no paragraph of their own — `Expat` is the canonical name for MIT, and `other-permissive` now has a stanza naming the four crates it covers. *Overridden:* `source-contains-patch-failure-file` on all 156 `Cargo.toml.orig` files, which is [B30](11-bug-log.md#b30)'s file seen from the other side. *Overridden and written down as an ITP blocker:* two **prebuilt Windows DLLs** in `libloading`'s test fixtures. Nothing here builds, links or runs them, and they are still prebuilt binaries without source. An override is not a fix and is not claimed as one. Re-run after the overrides: **clean** |
+| A source package that could actually be uploaded | **observed** — `faciolock_0.1.0~ppa1.dsc` + a **47 MB** `.tar.xz`, `3.0 (native)`, declaring all three binaries. Well inside Launchpad's limits despite the 194 MB vendored tree |
+| Multi-arch fields | **observed** — `faciolock` and `faciolock-models` `foreign`, `libpam-faciolock` `same`. `lintian` caught the combination that cannot hold (`Multi-Arch: same` depending on a package that declares nothing), and `fprintd` had already answered it on this machine: `libpam-fprintd` same → `fprintd` foreign. Read off `dpkg-query` rather than recalled |
+| **`lintian` clean on both `.changes`, binary and source** | **observed** — zero output from either, after one fix, three justified overrides and the multi-arch correction |
+| The whole test suite runs inside the package build | **observed** — `cargo test --release --workspace --locked` is `override_dh_auto_test`, and the five hardware tests stay `#[ignore]`d because a buildd has no camera |
+| Contents match `install-local.sh` | **observed**, `dpkg -c` on all three, with the three deliberate divergences and nothing else |
+| `pam-auth-update` profile at `Default: no`, `Priority: 512` | **verified** — the file has read that way since Phase 6 |
+| `postinst`/`prerm` call `pam-auth-update --package` | **observed** in the built `.deb`, and copied verbatim from `libpam-fprintd`'s own scripts on this machine rather than reconstructed |
+| The `faciolock` user is actually created on install | **observed after two wrong versions** — [B31](11-bug-log.md#b31). `dh_installsysusers` is not in this debhelper's sequence, so it needs the right filename *and* an explicit call. Independent confirmation: `Depends` gained `systemd \| systemd-standalone-sysusers \| systemd-sysusers`, which only `dh_installsysusers` adds |
+| The socket is started, not merely enabled | **observed** in the generated postinst — `_dh_action=start` on install, `restart` on upgrade. A first draft passed `--no-start` for both units, which would have left the socket enabled and not listening until a reboot |
+| Units under `/usr/lib/systemd/system`, not `/etc` | **observed** |
+| No `/etc/faciolock/faciolockd.toml` shipped | **observed** — the directory ships, the file does not. Load-bearing: `probe::write_config` opens with `create_new(true)` (P5-e), so a shipped conffile would permanently break `diagnose --write` |
+| The module links libpam | **observed** — `libpam-faciolock` depends on `libpam0g (>= 0.99.7.1)`, picked up from the real `DT_NEEDED` by `dh_shlibdeps` rather than declared by hand |
+| Vendored build works offline | **observed** — `CARGO_NET_OFFLINE=true` and `--locked` throughout, against `vendor/` |
+| Reproducible: two builds, identical `.deb` | **observed** — all five artefacts byte-identical across two independent runs, `-dbgsym` included, `sha256sum -c` on every one. `SOURCE_DATE_EPOCH` comes from the changelog, `--locked` pins the tree, and the vendored sources are the same bytes both times. **The caveat is stated rather than buried: both builds ran from the same path.** Nothing yet sets `--remap-path-prefix`, so a build from a different directory is untested and would be the next thing to fix |
+| **Install the built packages, on the reference machine** | **observed 2026-08-31 22:57.** `install-local.sh --remove`, then `apt install` of the three `.deb`s. `apt` created `/etc/systemd/system/sockets.target.wants/faciolock.socket → /usr/lib/systemd/system/faciolock.socket` — the `dh_installsystemd` split doing its job — and the socket came back `srw-rw---- root faciolock-auth`. No `/etc/systemd/system/faciolock.*`, so the package's units are the ones in force rather than shadowed by the hand-install's |
+| **The enrolment survives a hand-install → package swap** | **observed** — `faciolockctl list` reads `1000 csr 4676 bytes, 4 h ago` through the packaged binary against a store written by the hand-installed one. That is the upgrade-persistence path, for free |
+| **The packaged daemon authenticates** | **observed** — `faciolockctl test csr` → **`Allow`**, 1,965 ms cold. Everything in that path is the package's: the daemon out of `/usr/libexec`, the models out of `/usr/share/faciolock/models` under `ProtectSystem=strict`, the socket from the packaged unit |
+| **`diagnose` from the packaged binary** | **observed**, and as the *unprivileged* user, which is the one command that does not need root. Selected `/dev/video2`, rejected the RGB node and both metadata nodes, **alternation 1.00 at 61,420:1** — a far cleaner strobe than the 44.8:1 read in daylight, which is [B18](11-bug-log.md#b18) visible in the diagnostic rather than in a refusal |
+| **Purge removes everything it installed** | **observed** — `apt remove --purge` took the units, both binaries, the module, the pam-configs profile and the models. `systemctl is-enabled faciolock.socket` → `not-found`, and the `sockets.target.wants` symlink is gone |
+| **`prerm` un-enables the PAM profile** | **observed, and this is the leg that mattered most.** The profile was *enabled* in `common-auth` at removal time, and afterwards that file reads `auth [success=1 default=ignore] pam_unix.so nullok` — our two lines gone, and **`try_first_pass` gone with them**. [07](07-desktop-and-packaging.md#rolling-it-out-and-getting-back-out) flagged that `pam-auth-update` rewrites `pam_unix` when a Primary module sits above it; the removal reverted its own edit rather than leaving it |
+| **What purge deliberately leaves** | **observed** — `/var/lib/faciolock` (the enrolment and its key), `/etc/faciolock/faciolockd.toml`, the `faciolock` user and the `faciolock-auth` group. dpkg says so out loud: `directory '/etc/faciolock' not empty so not removed`. All four are the designed answer to "a package that deletes a biometric template on a bad upgrade costs you a re-enrolment" |
+| One thing purge did **not** take | **`/run/faciolock.sock`**, left as an orphaned inode with nothing listening. The `prerm` stops both units correctly; systemd's `RemoveOnStop=` simply defaults to `no`. It clears at reboot and systemd rebinds over it — the 22:57 install did exactly that over the hand-install's leftover — so nothing breaks. Fixed anyway with `RemoveOnStop=yes`, because "uninstall" is a leg of this phase's exit and a file the uninstall did not take is a file the uninstall did not take |
+| **Unlock, on the packaged install** | **observed 2026-08-31 23:02:00**, and the journal distinguishes it from the `test` 37 seconds earlier better than any description could: `auth uid=1000 verdict=Allow reason=match similarity=0.904 agreeing=3 live=pass probes=3 **pid 100946 uid 1000** elapsed=1972`. The `test` at `23:01:23` carries `uid 0` — root asking on the CLI's behalf. This one carries **`uid 1000`**, an unprivileged session process asking about itself, which is `kscreenlocker_greet` and nothing else. Same signature as Phase 6's `19:20:33`, now through packaged units, a packaged daemon and a packaged module |
+| PPA upload | **not attempted** — needs a Launchpad account and a signing key |
 
 ---
 

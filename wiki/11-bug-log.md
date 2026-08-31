@@ -9,6 +9,8 @@ to fix.
 
 | # | Bug | Severity | Status |
 |---|---|---|---|
+| [B31](#b31) | **The package shipped the sysusers file and never ran it — twice, for two different reasons.** `dh_installsysusers` reads only `debian/package.sysusers`, *and* it is not in this debhelper's `dh` sequence at all. So the `faciolock` user is never created and the daemon cannot start | **high** | fixed; `debian/faciolock.sysusers` **and** an explicit `execute_after_dh_install: dh_installsysusers`. The build was green through both wrong versions |
+| [B30](#b30) | **`dh_clean` deleted the vendored tree's integrity data.** Every `cargo vendor` crate carries a `Cargo.toml.orig` that `.cargo-checksum.json` hashes, and `dh_clean` sweeps `*.orig` as patch leftovers | medium | fixed; `dh_clean -X.orig`. Found by the first package build, which is what package builds are for |
 | [B29](#b29) | **Every cron job lit the IR emitter for 30 s.** The account hook activates the daemon and activation warmed the camera, so a `run-parts` at :17 turned the lens on | **high** | fixed; the startup warm is deleted, the camera opens only for a request that needs it |
 | [B28](#b28) | **`bench`'s first sample is the daemon cold start**, and at n=20 that sample *is* the p99 and the max | **high** | fixed; one unmeasured warm-up first, as [B15](#b15) |
 | [B27](#b27) | **One refused enrolment pose disabled idle-exit permanently** — the daemon fell into a blocking `accept` and never re-polled | **high** | fixed; the decision is a function now, and asserted |
@@ -36,6 +38,112 @@ to fix.
 | [B3](#b3) | `2>/dev/null` hid a missing binary as "no evidence" | medium | documented |
 | [B2](#b2) | Half the `/dev/videoN` nodes are not cameras | low | fixed |
 | [B1](#b1) | Dead conditional in `build_pairs` | trivial | removed |
+
+---
+
+## B31 — The package shipped the sysusers file and never ran it {#b31}
+
+**Severity: high**, and the interesting part is that **the build was green**. `dh_clean`
+([B30](#b30)) failed loudly and was fixed in a minute. This one produced three well-formed
+`.deb`s, a clean `lintian` run, and a package that cannot start the daemon it installs.
+
+`data/sysusers.d/faciolock.conf` was listed in `debian/faciolock.install`, which is the
+obvious thing to do with a file that belongs in `/usr/lib/sysusers.d/`. It works, in the
+sense that the file lands in the right place with the right mode. What it does not do is
+tell anything to *read* it:
+
+```text
+$ dpkg -c faciolock_0.1.0~ppa1_amd64.deb | grep sysusers
+-rw-r--r-- root/root  887  ./usr/lib/sysusers.d/faciolock.conf     <- shipped
+
+$ grep sysusers debian/faciolock/DEBIAN/postinst
+                                                                    <- nothing
+```
+
+`dh_installsysusers` reads exactly one input, `debian/package.sysusers`, and from it does
+two things: installs the file *and* writes a `systemd-sysusers` call into the postinst.
+Route the file in any other way and you get the first half silently.
+
+**Renaming the file to `debian/faciolock.sysusers` produced an identically broken package**,
+which is the part worth writing down. Calling `dh_installsysusers` by hand in the build tree
+worked — file installed, snippet generated — so the helper was doing its job and something
+was not calling it. It is simply **not in the sequence**:
+
+```text
+$ dh binary --no-act | grep -i "sysusers\|tmpfiles\|systemduser"
+   dh_installtmpfiles
+   dh_installsystemduser
+```
+
+`dh_installtmpfiles` is there. `dh_installsystemduser` is there. `dh_installsysusers` is
+not, on debhelper 13.31ubuntu1 with `debhelper-compat (= 13)`. So the fix is two changes,
+not one: the right filename **and** an explicit `execute_after_dh_install:
+dh_installsysusers`.
+
+There is no dpkg trigger to fall back on either. `systemd`'s trigger list on this machine
+covers `/usr/lib/systemd/catalog`, `binfmt.d` and `sysctl.d`, and **not** `sysusers.d`:
+
+```text
+$ cat /var/lib/dpkg/info/systemd.triggers
+interest-noawait /usr/lib/systemd/catalog
+interest-noawait /usr/lib/binfmt.d
+interest-noawait /usr/lib/sysctl.d
+interest-noawait libc-upgrade
+```
+
+So `systemd-sysusers.service` at next boot is the only thing that would ever have created
+the user, and "reboot before the package works" is not an install.
+
+**Fixed:** `debian/faciolock.sysusers` (a symlink to `data/sysusers.d/faciolock.conf`, so
+the users stay declared once), the `.install` line removed, and the explicit call in
+`debian/rules`. The postinst now carries `systemd-sysusers faciolock.conf`.
+
+The class is worth naming, and it is not "wrong filename". **The absence of a build step is
+invisible.** A step that runs and fails is a red build; a step that never runs produces a
+package that passes `lintian`, installs without error, and does nothing. Both wrong versions
+here built three well-formed `.deb`s. The only thing that distinguishes them from the right
+one is a grep for a snippet that should be in a file — which is to say, you have to already
+suspect it.
+
+That is also why the check belongs before the fresh-VM run rather than in it: the missing
+half only surfaces on a machine that has never had the package, which is the most expensive
+run to reach and the worst place to learn that a maintainer script was never generated.
+
+---
+
+## B30 — `dh_clean` deleted the vendored tree's integrity data {#b30}
+
+**Severity: medium.** It cannot ship — the build fails rather than producing a wrong
+package — but it fails in a way that reads as a corrupt vendor directory rather than as a
+tool doing its job, and the first instinct is to re-run `cargo vendor`, which produces the
+same result.
+
+The first package build of the project, 2026-08-31:
+
+```text
+cargo build --release --workspace --locked
+error: failed to calculate checksum of: …/vendor/v4l-0.14.0/Cargo.toml.orig
+Caused by:
+  No such file or directory (os error 2)
+```
+
+`cargo vendor` writes a `Cargo.toml.orig` into every crate it vendors — the manifest as
+upstream published it, before cargo's own rewriting — and lists it in that crate's
+`.cargo-checksum.json`. `dh_clean` sweeps `*.orig`, `*.rej` and `*~` as leftovers from a
+patch that did not apply. Both are correct in isolation. Together, `debian/rules clean` runs
+before `debian/rules build`, so every vendored crate loses a file its own checksum manifest
+insists exists, and the build dies on the first one alphabetically.
+
+**Fixed:** `override_dh_clean: dh_clean -X.orig`.
+
+The general shape is worth keeping: a build that vendors third-party source into the source
+package inherits every assumption the packaging tools make about what a file extension
+means. `.orig` means "patch leftover" to debhelper and "upstream manifest" to cargo, and
+nothing warns that both are true in the same directory.
+
+**This is what a package build is for.** Nothing in `cargo test`, `install-local.sh` or
+`activation-try.sh` could have found it, because none of them go anywhere near `dh_clean`.
+The phase item that reads "four binary packages" was worth building rather than designing.
 
 ---
 

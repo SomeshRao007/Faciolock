@@ -344,22 +344,120 @@ packages for every crate, or an explicit vendoring exception. Realistic sequenci
 2. **Debian ITP** once the design is stable and the security story is documented.
 3. **Ubuntu/Kubuntu** syncs from Debian; going straight to Ubuntu is the harder path.
 
+### As built, 2026-08-31 (P7-b)
+
+Three packages, not four — `plasma-faciolock-kcm` is the "(later)" row in the table above
+and has no v1 deliverable behind it.
+
+**Launchpad's builders have no network**, which is the constraint that decided the shape.
+Every crate the workspace needs must be inside the source package before upload, and
+`dh-cargo` — the archive's answer — wants a `librust-*-dev` for each of 156 crates. That is
+step 2 of the sequence above, not step 1. So the source package carries a vendored tree,
+and `tools/mk-source-package.sh` assembles it:
+
+```text
+git ls-files  ──┐
+                ├─→  build copy  ──→  cargo vendor  ──→  dpkg-buildpackage
+models/*.onnx ──┘
+```
+
+The models are copied in explicitly because `.gitignore` has excluded them since Phase 0
+and `faciolock-models` cannot be built without them. Everything else follows from what git
+tracks, which is why `corpus/` (554 MB), `spikes/` (2.5 GB) and `fuzz/` (512 MB) stay out
+of the tarball without anyone having to remember them — and `fuzz/` staying out is not
+housekeeping, it is the same rule that keeps `libfuzzer-sys` out of the lockfile that
+`faciolock-pam`'s dependency-tree test rests on.
+
+`vendor/` is ~194 MB and never enters the repository. Format is `3.0 (native)`: there is no
+upstream/downstream split to model, so one tarball beats three files kept in step.
+
+Three deliberate divergences from `tools/install-local.sh`, which is otherwise the file
+layout spec:
+
+| | `install-local.sh` | The package |
+|---|---|---|
+| Units | `/etc/systemd/system` | `/usr/lib/systemd/system` — an admin's `/etc` is not a package's to write |
+| Stripping | `install -s` | `dh_strip`, which also produces `-dbgsym` packages |
+| Config file | never created | never created — the same rule, and for the same reason: `probe::write_config` uses `create_new(true)` (P5-e), so a shipped conffile makes `diagnose --write` refuse forever |
+
+The `faciolock-auth` group membership a package cannot grant, because which humans may ask
+the daemon about themselves is an administrator's decision. It is in `README.Debian` and on
+the VM exit path; without it, the lock screen falls through to the password field silently.
+
+#### The multi-arch fields, taken from `fprintd` rather than reasoned about
+
+`libpam-faciolock` is `Multi-Arch: same` — a PAM module lives in a multiarch path and an
+i386 application on an amd64 system needs the i386 module. But a `Multi-Arch: same` package
+may not depend on one that declares nothing, and `lintian` says so
+(`dependency-is-not-multi-archified`).
+
+`fprintd` is the design this copies and it had already answered it, on this machine:
+
+```text
+libpam-fprintd  Multi-Arch: same     Depends: fprintd (= 1.94.5-4), …
+fprintd         Multi-Arch: foreign
+```
+
+So `faciolock` and `faciolock-models` are `Multi-Arch: foreign`. That is the correct claim
+rather than the convenient one: what the module needs from the daemon is *a daemon on the
+other end of a socket*, and the architecture of the process behind it is not the module's
+business — which is the same privilege-split argument [04](04-architecture.md) makes, showing
+up in a control file.
+
+#### The two units want opposite treatment from `dh_installsystemd`
+
+A first draft passed `--no-start` for both, on the reasonable-sounding theory that a face
+authentication daemon should not begin running because you installed it. That reasoning is
+right about the **service** and wrong about the **socket**, and getting it wrong fails the
+phase's own exit criterion on the first command after the install:
+
+| Unit | Treatment | Why |
+|---|---|---|
+| `faciolock.socket` | default — enable, start, restart after upgrade | The socket *is* the idle state. Nothing runs behind it, and `--no-start` leaves it enabled but not listening until the next reboot, so `faciolockctl diagnose` stats a socket that does not exist. The restart-after-upgrade half matters too: it is the only thing that rebinds a changed `SocketMode` or `SocketGroup`, which is the same trap `install-local.sh` guards with a deliberate `systemctl restart` |
+| `faciolock.service` | `--no-start` | Starting `faciolockd` directly hands it no inherited fd, so it self-binds — and then the socket unit's inode is the one nothing is listening on |
+
+`dh_installsystemd` also runs once per binary package and errors on a unit the current
+package does not ship, so both calls are scoped with `-pfaciolock` and followed by
+`--remaining-packages`.
+
 ## The upstreaming checklist
 
 A distro security team will ask these. Having answers *before* filing anything is
 most of the work:
 
-- [ ] Every shipped file DFSG-compatible, models included, licenses vendored
-- [ ] Reproducible builds
-- [ ] `systemd-analyze security` score documented
-- [ ] Threat model published ([03](03-pam-and-security.md))
+- [x] **A licence at all** — GPL-3.0-or-later (P7-a). This was not on the list and blocked
+      every other item on it
+- [~] Every shipped file DFSG-compatible, models included, licenses vendored — the shipped
+      files are clean and `debian/copyright` names them per file. **Two things are open, and
+      both are ITP blockers rather than PPA blockers.** SFace's provenance (P7-c): the
+      Apache-2.0 grant beside the weights covers the artefact, not the question of whether
+      the redistributor could grant it — written into the copyright file rather than left in
+      the wiki, because that is where a reviewer looks. And `vendor/libloading-*/tests/`
+      carries **two prebuilt Windows DLLs**, which nothing here builds, links or runs, and
+      which are still prebuilt binaries without source. Overridden with the reason attached;
+      the real fix is `Files-Excluded` repacking plus regenerating that crate's
+      `.cargo-checksum.json`, and it is not worth doing before the archive path is walked
+- [~] Reproducible builds — **built twice, all five artefacts byte-identical**, `-dbgsym`
+      included. `SOURCE_DATE_EPOCH` from the changelog, `--locked`, vendored sources. Not
+      yet path-independent: both runs used the same build directory and nothing sets
+      `--remap-path-prefix`, so this is "reproducible here", not "reproducible anywhere"
+- [x] `systemd-analyze security` score documented — **0.6**, and the same run does the real
+      work rather than just scoring
+- [x] Threat model published ([03](03-pam-and-security.md))
 - [ ] Independent security review, ideally by someone who has reviewed PAM modules
-- [ ] Fuzzing on both the IPC parser and the frame-handling path (`cargo-fuzz`)
-- [ ] `cargo tree -p faciolock-pam` = libc + ipc, asserted in CI
-- [ ] Documented, tested recovery path if the module misbehaves (boot to recovery, `pam-auth-update`)
-- [ ] Opt-in by default
-- [ ] Honest README about the security ceiling
-- [ ] CVE contact / security policy
+- [~] Fuzzing on both the IPC parser and the frame-handling path — targets written, and
+      **never run**: `cargo-fuzz` needs nightly and the reference machine has stable. The
+      same properties are asserted by seeded generators in `cargo test`, which is the
+      property without the coverage-guided search
+- [x] `cargo tree -p faciolock-pam` = libc + ipc, asserted in CI
+- [x] Documented, tested recovery path if the module misbehaves — walked on 2026-08-31
+      (by-hand `sudo` line, restored from backup; then the profile, enabled and removed),
+      and it now ships as `libpam-faciolock`'s `README.Debian` rather than living only here
+- [x] Opt-in by default — `Default: no`, and installing the module is not enabling it
+- [x] Honest README about the security ceiling — and it grew two entries in Phase 7 rather
+      than losing any: B24's print and B18's daylight
+- [x] CVE contact / security policy — `SECURITY.md`, with an out-of-scope section that
+      names the known limitations so a reporter finds them before writing
 
 ## Hardware reality check
 
