@@ -9,6 +9,7 @@ to fix.
 
 | # | Bug | Severity | Status |
 |---|---|---|---|
+| [B29](#b29) | **Every cron job lit the IR emitter for 30 s.** The account hook activates the daemon and activation warmed the camera, so a `run-parts` at :17 turned the lens on | **high** | fixed; the startup warm is deleted, the camera opens only for a request that needs it |
 | [B28](#b28) | **`bench`'s first sample is the daemon cold start**, and at n=20 that sample *is* the p99 and the max | **high** | fixed; one unmeasured warm-up first, as [B15](#b15) |
 | [B27](#b27) | **One refused enrolment pose disabled idle-exit permanently** — the daemon fell into a blocking `accept` and never re-polled | **high** | fixed; the decision is a function now, and asserted |
 | [B26](#b26) | The installer created a **placeholder config**, which permanently blocked `diagnose --write` | medium | fixed; the installer creates the directory and nothing else |
@@ -35,6 +36,98 @@ to fix.
 | [B3](#b3) | `2>/dev/null` hid a missing binary as "no evidence" | medium | documented |
 | [B2](#b2) | Half the `/dev/videoN` nodes are not cameras | low | fixed |
 | [B1](#b1) | Dead conditional in `build_pairs` | trivial | removed |
+
+---
+
+## B29 — Every cron job lit the IR emitter for thirty seconds {#b29}
+
+**Severity: high.** Not for what it broke — nothing broke — but for what it is: a camera that
+turns itself on several times an hour on an idle laptop, with no authentication anywhere near
+it. Reported by the operator as "the cam starts every now and then and fires up IR rays", one
+day after the `pam-auth-update` profile was enabled.
+
+### What happened
+
+Four steps, and each one is defensible alone.
+
+1. `pam-auth-update` writes **both** halves of the profile. `Account-Type: Additional` puts
+   `account optional pam_faciolock.so` into `/etc/pam.d/common-account`, which is where
+   [P4-b](04-architecture.md)'s lockout release has to live.
+2. `/etc/pam.d/cron` `@include`s `common-account`. Debian's cron calls `pam_acct_mgmt` for
+   every job it runs, so `pam_sm_acct_mgmt` → `clear_lockout` fires on each one and
+   `connect()`s to the socket to send `Op::Clear`.
+3. **Under socket activation a `connect()` is a service start** — the same fact that produced
+   [B25](#b25), arriving from a different direction.
+4. The daemon then warmed the camera in a thread *before looking at the request*, and
+   `Session` holds the `Capture` for the life of the process. So the stream stayed on for the
+   **entire 30 s idle window**, not for the 340 ms of the warm burst.
+
+From one hour of the reference machine's journal, with nothing but stock Debian cron entries:
+
+```text
+17:09:01  Started faciolock.service          <- phpsessionclean
+17:09:02  pid 12418 uid 0 left before the answer (Broken pipe (os error 32))
+17:09:03  camera warm on .../video2, 6 frames in 336 ms
+17:09:32  idle for 30 s, exiting
+17:17:01  Started faciolock.service          <- run-parts /etc/cron.hourly
+17:30:01  Started faciolock.service          <- the anacron kick
+```
+
+Three activations in twenty-one minutes, three IR bursts, ~90 s of emitter, ~300 MB-seconds of
+model load, and **not one of them wanted a face**. The `Broken pipe` line is the module's own
+300 ms `CLEAR_DEADLINE` expiring while the daemon it just started is still SHA256ing 39 MB of
+model — cron gave up before the answer it triggered all of this to receive.
+
+`common-auth` is innocent here: cron never calls `pam_authenticate`. The auth hook did not run.
+
+### The fix
+
+**Delete the warm thread.** Thirteen lines, and there was nobody left to lose by it:
+
+- [P6-a](09-roadmap.md#the-pre-warm-agent-was-specified-against-a-signal-that-does-not-exist-p6-a)
+  had already established there is no signal that means "a person is about to return", so the
+  warm was firing on "somebody connected", which is not the same event and on this machine was
+  usually cron.
+- PAM runs the **auth** stack before the **account** stack, so a `Clear`-triggered warm can
+  never precede the `Auth` in the same login — the only order in which it would have helped.
+- On a cold `Auth` it is a *cost*, not a saving: the arriving request waits on the session
+  mutex for the warm's full burst and then takes its own. The 16:54 sample won the race and
+  paid `elapsed=1782`; had it lost, it would have paid that plus a burst.
+
+What remains is the honest cost, and P6-a always said it stays visible: the first
+authentication after an idle-exit pays the model load plus the device open plus its burst.
+
+Measured after the deletion, without root and without disturbing the installed daemon: the
+patched binary self-bound on a scratch socket, left listening for two seconds, holds
+
+```text
+/proc/PID/fd:  socket:[84481]   /dev/null   the log   (and nothing else)
+```
+
+Zero `/dev/video*`. The old binary opened the device **1–2 s after `Started`** — model load and
+the 39 MB SHA256 come first, then the warm thread — and then held it until the process exited.
+The `336 ms` in the journal line is the burst *span*, not the time to the open, and not the
+time the emitter was on: that was the whole idle window.
+
+### The residual, and it is deliberate
+
+The camera is still held for the rest of the idle window **after a genuine unlock**, because
+`Session` keeps the `Capture` so a retry does not re-open the device. Closing it between
+bursts would put a ~400 ms re-open in front of every lock-screen retry, against a 400 ms p95
+budget. Left as it is, on the operator's call — it is now bounded by an actual authentication
+rather than by cron's schedule.
+
+### The lesson
+
+**A daemon that starts itself has no idea why it was started, and eager work in `main` is
+work done for the worst caller.** [B25](#b25) was the same fact seen from the client side — a
+`connect()` is a start — and it was fixed there by not connecting. Here the connect is
+legitimate and the fix is on the other end: do nothing on startup that a request has not
+asked for. The property is now asserted rather than reasoned about, in
+`tools/activation-try.sh` PART 2: after a `status` request, the daemon holds **zero**
+`/dev/video*` fds. The harness header had *claimed* since the day it was written that parts
+1–4 "never open the device" — it was describing the requests, and the daemon was opening the
+device behind its back.
 
 ---
 

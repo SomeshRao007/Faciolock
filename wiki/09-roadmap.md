@@ -544,6 +544,20 @@ refused faces there turn face unlock off until a `sudo` or a `login` clears it. 
 with the two candidate fixes at
 [Q10](08-open-questions.md#the-knock-on-and-it-is-not-fixed-the-lock-screen-cannot-clear-a-spent-budget).
 
+### Enabling the profile turned the camera into a cron job (P6-e)
+
+The first thing the `pam-auth-update` profile did, one day in, was light the IR emitter three
+times an hour on an idle machine. The account half of the profile reaches `/etc/pam.d/cron`,
+every cron job therefore sends an `Op::Clear`, a connect under socket activation is a service
+start, and the daemon warmed the camera before it read the request — so `run-parts` at :17
+turned the lens on for a full 30 s idle window. [B29](11-bug-log.md#b29) has the journal.
+
+The startup warm is deleted rather than made conditional. It was written for P6-a's pre-warm,
+which does not exist; PAM runs auth before account, so the warm can never precede the `Auth`
+it would have helped; and on a cold authentication it *costs* a burst, because the arriving
+request waits on the session mutex behind it. `tools/activation-try.sh` PART 2 now asserts the
+daemon holds zero `/dev/video*` fds after a request that does not need the camera.
+
 **Exit:** zero RSS when idle (`pidof faciolockd` empty). KDE lock screen unlocks by
 face *and* password entry still works instantly while the camera is running.
 
@@ -572,6 +586,7 @@ written and tested, the install and the lock screen itself are not yet run.
 | **A face the daemon cannot judge still lets you in with a password** | **observed 2026-08-31, through `pam-auth-update` rather than the by-hand file.** `sudo -K; sudo true` at a covered lens: a password prompt, and the journal names the path — `auth uid=1000 verdict=Unavailable reason=ambient floor=1.31 live=pass probes=0 elapsed=1782 counted=0`. `default=ignore` watched end to end for the first time instead of argued from Phase 3's table. **`counted=0` is the second half of it**: nothing that never saw a face moved the budget, so P2-g's exemption held under a real `sudo` |
 | **A face that is looked at and *refused* still lets you in with a password** | **still not observed.** The run above went `Unavailable`, not `Deny` — the question was never asked, so this is the neighbouring path rather than this one. `default=ignore` treats them identically and Phase 3 observed the return code, but the `Deny` fall-through has never been watched end to end. It needs a face the camera can judge and a face that is not the enrolled one — after dark, alongside the other two |
 | Enabling it does not break the password path for every other service | **observed** — `pam-auth-update --enable faciolock` generated `auth [success=2 default=ignore] pam_faciolock.so` above `pam_unix`, and the arithmetic is right: a face success jumps to `pam_permit`, anything else falls to `pam_unix`, whose own `success=1` lands on the same `pam_permit`. It also rewrote `pam_unix` to `try_first_pass`, which is benign **only because our module never runs a conversation** — it stashes no password, so `try_first_pass` finds none and prompts. A future version that ever prompted would silently change `pam_unix`'s behaviour |
+| **The camera is not touched by an activation that does not need it** | **observed 2026-08-31, on the patched binary and against the machine's own journal.** [B29](11-bug-log.md#b29): with the profile enabled, cron's account stack activated the daemon three times an hour and each activation warmed the camera for a full idle window — `17:09:01`, `17:17:01`, `17:30:01`, each followed by `camera warm … 336 ms`. With the warm deleted, the daemon was started self-bound on a scratch socket, left listening for 2 s and its `/proc/PID/fd` read: **one socket, `/dev/null`, the log, and no `/dev/video*` at all**, where the old binary opened the device 1–2 s after `Started` (model load first) and then held it for the whole idle window. `activation-try.sh` PART 2 now asserts the same count under real activation; that run needs root and the installed socket stopped |
 | **The daylight tax is real and it is now on every `sudo`** | **observed** — the refusal above cost **1,782 ms in the daemon** before the password prompt, on top of the model load when the daemon had idle-exited. In a bright room [B18](11-bug-log.md#b18) means face auth *always* refuses, so enabling the profile in daylight buys nothing and costs two to three seconds per `sudo`. Not a defect; it is `idle_timeout_secs` and B18 meeting, and it is the strongest argument yet for the daylight work rather than for a bigger timeout |
 
 ---

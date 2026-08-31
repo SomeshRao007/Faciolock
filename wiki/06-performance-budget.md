@@ -103,18 +103,27 @@ size and a machine is not a measurement.**
 | …then the warm path | 318 ms |
 | **Total** | **~610–1010 ms** |
 
-Still 2–3× better than Howdy's per-auth cold start, but visible. Hence pre-warm.
+Still 2–3× better than Howdy's per-auth cold start, but visible. This was the case for
+pre-warm; see below for why there is no pre-warm and this is the normal first unlock.
 
-## Pre-warm
+## ~~Pre-warm~~ — abandoned at Phase 6, both halves
 
-The user-session agent pokes the socket on the compositor's "about to lock" /
-"idle" signal. If it fires ≥ 300 ms before PAM runs, the cold path is entirely
-hidden and every authentication is a warm one. Cheap to build, biggest single
-perceived-speed win in the project.
+> The user-session agent pokes the socket on the compositor's "about to lock" /
+> "idle" signal. If it fires ≥ 300 ms before PAM runs, the cold path is entirely
+> hidden and every authentication is a warm one. Cheap to build, biggest single
+> perceived-speed win in the project.
 
-Fallback if the compositor gives us no usable signal: keep the daemon alive with a
-longer idle timeout on AC power. Worse for the idle-RSS goal — a trade-off to expose
-in config, not to decide silently.
+**None of that survived contact.** The agent is deferred because the signal it needs does not
+exist — it warms on *lock*, and the cost is paid on *return*, minutes later, after the daemon
+has idle-exited ([P6-a](04-architecture.md#the-pre-warm-agent-does-not-work-as-specified-and-it-is-deferred-p6-a)).
+The daemon-side warm that stood in for it was deleted too, because "somebody connected" is not
+"a person came back" and on this machine it was mostly cron ([B29](11-bug-log.md#b29),
+[P6-e](README.md#decisions-taken)).
+
+So **the first authentication after every idle-exit is a cold one**, and the cold table above
+is what it costs. The fallback is now the whole plan: `idle_timeout_secs`, config, default
+30 s — a longer timeout trades that ~800 ms against a resident process holding a camera, and
+that is an operator's trade rather than one to decide silently.
 
 ## Memory budget
 
@@ -179,6 +188,14 @@ and its deadline is running, instead of unaccepted in a queue.
 
 Still the number to watch at Phase 6, where socket activation makes cold start the normal
 first unlock: model load 377 ms + camera warm + the authentication itself.
+
+**And at Phase 6 the thread this fix produced was deleted outright** ([B29](11-bug-log.md#b29)).
+The measurement above stands and its rule survives — the socket must answer before any camera
+work, or every request pays for one — but the right amount of camera work to do before a
+request asks for it turned out to be none. Under activation the *connect* is the start, so
+warming on a connect warms for whoever connected, and with the PAM profile enabled that was
+cron. The cold column is now paid by the first `Op::Auth` after each idle-exit, in the open
+rather than on a background thread.
 
 ## Disk / install footprint
 

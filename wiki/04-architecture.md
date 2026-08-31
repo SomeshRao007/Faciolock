@@ -108,6 +108,17 @@ Warm, only the last two rows are paid: **~750 ms**. `idle_timeout_secs` is there
 lever and the only honest one — it trades that ~800 ms against a resident process holding a
 camera. It is config, and the number is an operator's to choose.
 
+**The daemon-side half of the pre-warm went the same way, and it took a bug to notice
+(P6-e).** `serve()` used to warm the camera in a thread as soon as it had a listener — the
+agent's job done from the inside, on "somebody connected" instead of "a person came back".
+Once the PAM profile was enabled those two events diverged completely: cron's account stack
+connects several times an hour, so the emitter came on for a full idle window with nobody in
+front of it ([B29](11-bug-log.md#b29)). It could not have paid for itself in the meantime —
+PAM runs the auth stack before the account stack, so a `Clear`-triggered warm never precedes
+an `Auth`, and inside one login the arriving request just queues behind the warm's burst on
+the session mutex. The camera now opens for `Op::Auth` and `Op::Enroll` and for nothing else,
+and the table above is what the first one of those pays.
+
 ## IPC: what and why
 
 **Transport: `AF_UNIX` `SOCK_SEQPACKET` at `/run/faciolock.sock`, mode 0600 root:root.**
