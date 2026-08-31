@@ -4,10 +4,13 @@ IR face authentication for Linux, via PAM. Written in Rust, built to behave like
 platform component rather than an add-on.
 
 > [!WARNING]
-> **Pre-alpha. This does not yet unlock anything.**
+> **Alpha. It unlocks a screen, and it has been run on exactly one laptop.**
 >
-> The vision pipeline is built and tested; the daemon, the PAM module and the enrolment
-> CLI are not. There is nothing to install. See [Status](#status).
+> The full stack works end to end — enrolment, `sudo`, SDDM and the KDE lock screen all
+> authenticate by face on the reference machine. Two measured limitations ship with it:
+> face authentication **refuses in bright daylight**, and a **printed photograph is not
+> reliably rejected**. Both are below, neither is a surprise, and neither is fixed.
+> See [Status](#status) and [Hardware](wiki/15-hardware-compatibility.md).
 
 ---
 
@@ -23,6 +26,15 @@ What that means concretely:
 - A sufficiently determined attacker with a purpose-built artefact — an actively
   NIR-illuminated 3D mask — is **not reliably rejected**. This is also the bar Windows
   Hello sits at.
+- **A flat printed photograph is not reliably rejected either, and that is worse than the
+  line above.** Measured, not assumed: a magazine print read *above* the worst live face
+  on the falloff statistic the liveness check uses, so there is currently **no enforced
+  check that rejects a print**. A print costs a printer, not a workshop.
+  [B24](wiki/11-bug-log.md#b24).
+- **In bright daylight, face authentication refuses.** Ambient infrared saturates the
+  ratio the liveness checks are built on, so honest captures are rejected and you type
+  your password. It fails closed rather than open, which is the right direction, and it
+  is still the largest open defect in the project. [B18](wiki/11-bug-log.md#b18).
 - Every claim below distinguishes what has been **measured** from what has been
   **assumed**. Some checks that sound obvious have already been refuted by measurement
   (see [B17](wiki/11-bug-log.md)); assume nothing on this page is true because it is
@@ -104,13 +116,13 @@ Full design: [`wiki/`](wiki/).
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Hardware probe, corpus, runtime spikes | done, one item deferred |
-| **1** | **`faciolock-vision` — frames in, verdict out** | **done** |
-| 2 | `v4l` capture, `faciolockd` skeleton | not started |
-| 3 | PAM module + IPC | not started |
-| 4 | Template store, TPM sealing, rate limiting | not started |
-| 5 | `faciolockctl` enrolment CLI | not started |
-| 6 | systemd integration, sandboxing, all PAM services | not started |
-| 7 | Packaging, PPA release | not started |
+| 1 | `faciolock-vision` — frames in, verdict out | done |
+| 2 | `v4l` capture, `faciolockd` skeleton | done |
+| 3 | PAM module + IPC | done |
+| 4 | Template store, encryption, rate limiting | done — TPM sealing deferred to post-v1 |
+| 5 | `faciolockctl` enrolment CLI | done |
+| **6** | **systemd integration, sandboxing, all PAM services** | **done — the KDE lock screen unlocks by face** |
+| 7 | Packaging, PPA release | in progress |
 
 ### What is verified
 
@@ -125,15 +137,27 @@ Measured on the reference machine against recorded captures, not asserted:
 | SFace discriminates on **near-infrared** | genuine cross-capture cosine 0.60–0.90 against a 0.363 threshold |
 | Detection and alignment match OpenCV | box IoU 0.998–0.999; aligned chip mean diff 0.000, max 1 |
 | A phone screen showing a photo is rejected | verdict `NoFace` — though see below |
+| **The KDE lock screen unlocks by face** | 2026-08-31, twice, on a trackpad touch with no keystroke |
+| **`sudo` authenticates by face** | 2026-08-31, `sudo -K` then `sudo true`, no password prompt |
+| **A login through a display manager** | SDDM, 2026-08-31 — though the greeter decides *when* the face check runs, not us |
+| **Zero bytes resident when idle** | socket-activated, idle-exits, reactivates on the same inode under real systemd |
+| **The sandbox scores 0.6 and still does the work** | `systemd-analyze security`, and the same run opened the camera and loaded both models under it |
+| **A refused or unjudgeable face still lets you in with a password** | observed through `pam-auth-update`, and nothing that never saw a face moved the failure budget |
+| **The PAM module's dependency tree is `libc` + the IPC crate** | `cargo tree`, asserted by a test on every change |
 
 ### What is not
 
 Stated as plainly as the verified list, because a security claim without evidence is worth
 nothing:
 
-- **Printed photos are untested.** No print has been recorded — deliberately deferred. The
-  falloff check therefore enforces only a *degenerate-flatness floor* and **claims nothing
-  about prints**.
+- **Printed photos are tested, and they win.** The deferral was closed on 2026-08-19 and the
+  answer was the bad one: a magazine print measured CV 0.2733 against a worst live face of
+  0.2661, so the falloff check reads the print as *more* alive than a person. No liveness
+  check currently rejects a print. [B24](wiki/11-bug-log.md#b24).
+- **Daylight rejects honest faces.** Every strobe statistic is a ratio and ambient infrared
+  saturates a ratio. The gate fails closed, so the cost is a password prompt rather than a
+  bypass, but face authentication is effectively unavailable in a sunlit room.
+  [B18](wiki/11-bug-log.md#b18).
 - **The response test does not do what it was designed to do.** It was meant to reject
   screens on the grounds that an LCD emits nothing at 850 nm. A phone measured `D = 36.2`
   against a live minimum of 48.6, not the predicted ~0, because the statistic is
@@ -142,12 +166,56 @@ nothing:
 - **FAR is unmeasurable.** The corpus has one subject. The cosine threshold is OpenCV's
   RGB-calibrated 0.363 — paper-derived and provisional, and it does not meet this project's
   own "measured on our own corpus" standard.
-- **Latency is not a p95.** The ~399 ms warm path is a sum of per-stage medians, and 130 ms
-  of it is a frame-burst estimate that has never been measured.
+- **Latency has two measurements and they disagree.** An end-to-end bench against the
+  release daemon and the wiki's per-stage table differ by 133 ms in a direction that is
+  arithmetically impossible, so one of them is measuring something other than its label.
+  Until the frame burst is timed inside the daemon, **neither number is quotable** and none
+  is quoted here.
 - **One machine.** Every hardware claim comes from a single ASUS Vivobook.
 
 Three of the four liveness checks report as `advisory` rather than `enforced` in the
 verdict, so the audit log cannot overstate what was actually checked.
+
+---
+
+## Installing
+
+You need an **IR camera**. Check first — [`wiki/15`](wiki/15-hardware-compatibility.md)
+has the one-liner, and an RGB webcam will not do.
+
+Three packages: `faciolock` (daemon, CLI, units), `libpam-faciolock` (the module and its
+`pam-auth-update` profile), `faciolock-models` (the weights). Build them from a checkout:
+
+```bash
+./tools/mk-source-package.sh --binary
+```
+
+**Installing does not enable anything.** The profile registers at `Default: no`, so no PAM
+stack names `pam_faciolock.so` until you run `pam-auth-update` and tick it. Then:
+
+```bash
+sudo faciolockctl diagnose --write
+```
+```bash
+sudo faciolockctl enroll $USER
+```
+```bash
+sudo faciolockctl test $USER
+```
+
+`test` exercises the whole path without touching a single PAM file. For anything that
+authenticates inside your own desktop session — the lock screen above all — you also have
+to join the group the socket is gated on, and log out and back in:
+
+```bash
+sudo gpasswd -a $USER faciolock-auth
+```
+
+Enable it on `sudo` alone first, hold a root shell in a second terminal while you do, and
+read the recovery path before you start: [`wiki/07`](wiki/07-desktop-and-packaging.md#rolling-it-out-and-getting-back-out).
+Every failure mode — daemon down, not enrolled, rate-limited, refused — falls through to
+your password by construction, and the worst a broken PAM file can do is make one service
+refuse to authenticate. It cannot make a machine unbootable.
 
 ---
 
@@ -205,10 +273,18 @@ python3 -m venv .venv && .venv/bin/pip install opencv-python-headless numpy
 
 ```
 crates/faciolock-vision/   the pipeline: liveness, detection, alignment, embedding, matching
+crates/faciolock-camera/   V4L2 capture
+crates/faciolock-daemon/   faciolockd: the socket, the store, the policy, the audit log
+crates/faciolock-pam/      pam_faciolock.so -- libc + the IPC crate, and nothing else
+crates/faciolock-ipc/      the wire protocol both ends share
+crates/faciolock-cli/      faciolockctl: enrol, diagnose, test, bench
+data/                      systemd units, sysusers, polkit, the pam-configs profile
+debian/                    the three binary packages
 corpus/                    recorded IR captures (.gray gitignored, sidecars committed)
 models/                    vendored ONNX + per-file licence status
 spikes/                    Phase 0 throwaway measurement tools
-tools/                     corpus recorder, golden generator
+fuzz/                      fuzz targets, excluded from the workspace on purpose
+tools/                     installer, harnesses, corpus recorder, golden generator
 wiki/                      design, threat model, budgets, and the bug log
 ```
 
@@ -222,16 +298,21 @@ caught again.
 
 ## Licence
 
-**Not yet chosen** — see below. Until a `LICENSE` file exists, no licence is granted.
+**GPL-3.0-or-later** — [`LICENSE`](LICENSE).
 
 Vendored model files carry their own upstream licences (MIT and Apache-2.0) and are
-tracked separately in [`models/README.md`](models/README.md); a project licence does not
-apply to them.
+tracked separately in [`models/README.md`](models/README.md); the project licence does not
+apply to them. Every crate in the dependency tree is permissively licensed and compatible;
+the tally is in [`debian/copyright`](debian/copyright).
 
 ## Security
 
-Do not report suspected vulnerabilities via public issues. A disclosure contact will be
-published before the first release.
+**Do not report suspected vulnerabilities via public issues.** Email
+`cokasomeshrao@outlook.com` with `[faciolock security]` in the subject.
+
+Full policy, timelines, and the list of things that are known limitations rather than
+vulnerabilities: [`SECURITY.md`](SECURITY.md). Read the out-of-scope section before
+writing — a printed photograph defeating liveness is documented, not news.
 
 ## Acknowledgements
 
