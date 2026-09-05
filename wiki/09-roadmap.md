@@ -750,12 +750,114 @@ account and a signing key, which are the operator's to hold.
 
 ---
 
+## Phase 8 — The settings panel (week 9)
+
+**Started 2026-09-04.** Phase 7 shipped a system that works and can only be operated from a
+root terminal. Everything a person does with Faciolock — enrol, test, remove — is behind
+`sudo` or `pkexec`, so "install this" still means "open a terminal". The KCM has carried a
+"(later)" beside it since [07](07-desktop-and-packaging.md) was written; this is it.
+
+Scope was cut twice before any file was written, and both cuts are the point:
+
+- **Not B18/B24.** Both need capture sessions — a floodlight-in-daylight recording, more
+  prints, a second subject. They are the highest-value work in the project and none of it is
+  desk work. The risk register still carries them and the README still names them.
+- **Not the release.** The PPA upload needs a Launchpad account and a signing key.
+- **GNOME/GDM: nothing installed, so nothing claimed.** Recorded as a
+  [desktop compatibility table](07-desktop-and-packaging.md#desktop-compatibility) with one
+  observed row and one untested one, and the two questions that decide it written out.
+
+### The panel holds no privilege, because it did not need any (P8-a)
+
+The obvious way to build a settings page for a root-only CLI is to give the page a way to be
+root: a D-Bus service, a helper, a polkit action per operation. None of that was written,
+because Phase 7 had already shipped the boundary. `org.faciolock.manage` annotates
+`org.freedesktop.policykit.exec.path=/usr/bin/faciolockctl` and `faciolockctl`'s own error
+message has told people to run `pkexec faciolockctl …` since Phase 5. The panel does exactly
+that. It can do what you could do at a terminal and nothing more, and there is no new code
+between a click and a capability.
+
+The one thing it deliberately **cannot** do is switch face unlock on or off. That is
+`pam-auth-update`, which is not our binary, so covering it means a second polkit action
+authorising admin-level PAM reconfiguration — a wider boundary than a settings page has any
+business opening. The panel reads `/etc/pam.d/common-auth`, reports the state, and prints the
+command.
+
+### `Op::Status` was already unprivileged, and nothing had ever called it that way (P8-b)
+
+`serve::may_ask` has said `peer_uid == 0 || (subject == Some(peer_uid) && matches!(op,
+Op::Auth | Op::Status))` since P6-d, and Phase 2 measured `Op::Status` at **0 ms, no camera
+touched**. So a session process may ask whether *it* is enrolled, for free — and no caller
+existed: `faciolockctl list` reads the 0700 store and is root-only.
+
+`faciolockctl status` is that caller. It is what lets the panel show its state on open with no
+password prompt, and it is one line of output with the state first so a GUI splits rather than
+parses prose.
+
+Writing it turned up a message that had been wrong since P6-d: the socket error still said
+*"is not readable by this user — run as root"*, from when the socket was `0600 root:root`. It
+is `0660 root:faciolock-auth` now, and the useful half of the answer is the group, not root.
+`needs_root` carried the same fossil — "the socket is 0600" — when what actually needs root is
+the 0700 store and `may_ask` refusing `Enroll` and `Clear` to everyone else.
+
+### Enrolment blocks on stdin, and a GUI streaming stdout would hang forever (P8-c)
+
+`prompt()` is `print!("{instruction}  [Enter] ")`, flush, `read_line`. Two properties, both
+invisible until something other than a terminal reads it: it **waits for the operator between
+every pose**, and the prompt **carries no newline**, so a reader waiting for a line waits
+through the entire enrolment. A panel that only piped stdout to a text box would show an empty
+box and a process that never finishes.
+
+The fix is not to reimplement the loop in the panel. Off a terminal — `std::io::stdout()
+.is_terminal()`, stdlib — `prompt()` emits one extra line first, `[pose 1/3] <instruction>`.
+The panel keys on it, shows a Capture button, and clicking it writes the newline `read_line`
+is blocked on. The terminal path is byte-identical to before. The marker is a contract, so it
+has a test: reword it and the panel silently stops prompting, which is the failure that would
+be hardest to find.
+
+The alternative was parsing the trailing `[Enter] ` out of the prompt itself, which works
+today and breaks the next time someone improves the wording.
+
+### KF6 has no pure-QML KCM
+
+Checked before designing around it: `kcmutils_add_qml_kcm()` takes a C++ `SOURCES` argument
+and wants a `KQuickConfigModule` subclass. The KF5 KPackage-based QML-only module is gone. So
+the KCM is C++ and CMake in a workspace that had neither — five files, of which one has real
+content — and the base class was read off `kcm_users.so` on this machine (`KQuickConfigModule`,
+not the `Managed` variant, which wants a `KCoreConfigSkeleton` this panel does not have).
+
+"Both" — System Settings *and* a launcher entry — cost a `.desktop` file rather than a second
+binary, because `kcmshell6` already opens any KCM as its own window. The generated System
+Settings entry is `NoDisplay=true`; the shipped one is not. Confirmed by reading both files
+out of the build tree rather than by expecting it.
+
+**The first build failed on a missing header, and the header was not the problem.** Upstream's
+own example links `KF6KCMUtilsQuick`, which is the target name *inside* the kcmutils source
+tree and is not exported to consumers — the exported one is `KF6::KCMUtilsQuick`. CMake does
+not treat an unknown name in `target_link_libraries` as an error; it assumes a system library
+and passes `-lKF6KCMUtilsQuick` to the linker. So the include directories that target carries
+never arrived, and the failure surfaced 40 lines later as
+`KQuickConfigModule: No such file or directory`. Fixed by reading the exported target names
+out of `KF6KCMUtilsTargets.cmake` on this machine, which is the same move that settled the
+base class and the multi-arch fields in Phase 7: the answer is on the disk.
+
+**The panel runs before it is installed.** `QT_PLUGIN_PATH=target/kcm/bin kcmshell6
+kcm_faciolock` loads the plugin straight out of the build tree, which is how the first render
+was checked with no root and nothing installed. It came up correctly on its unhappy path —
+`/usr/bin/faciolockctl is not installed`, which was true, since Phase 7's purge took it — with
+all three action buttons disabled and no QML warnings.
+
+**Exit:** a face enrolled from a GUI, by someone who never opened a terminal — then the four
+packages built, `lintian` clean on both `.changes`, installed and purged.
+
+---
+
 ## Beyond v1
 
-- KDE settings module (KCM) — QML/Kirigami, not Rust, separate deliverable
+- ~~KDE settings module (KCM)~~ — **Phase 8**
 - Debian ITP → archive ([07 checklist](07-desktop-and-packaging.md#the-upstreaming-checklist))
 - Independent security review — ideally someone who has reviewed PAM modules before
-- GNOME/GDM support
+- GNOME/GDM support — [the two open questions](07-desktop-and-packaging.md#desktop-compatibility)
 - Hardware compatibility expansion from user reports
 
 ---

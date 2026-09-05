@@ -10,7 +10,7 @@
 | SDDM greeter | `sddm` | display-manager login |
 | polkit prompts | `polkit-1` | KDE auth dialogs |
 | TTY login | `login` | camera may not be initialised this early |
-| GDM/GNOME (later) | `gdm-password` | for portability beyond Kubuntu |
+| GDM/GNOME (untested) | `gdm-password` | for portability beyond Kubuntu — see [Desktop compatibility](#desktop-compatibility) |
 
 ## KDE specifics — the important one
 
@@ -314,7 +314,7 @@ Binary packages:
 | `faciolock` | daemon, CLI, systemd units, config |
 | `libpam-faciolock` | `pam_faciolock.so` + `/usr/share/pam-configs/faciolock` |
 | `faciolock-models` | the ONNX files + their licenses |
-| `plasma-faciolock-kcm` (later) | KDE settings module |
+| `plasma-faciolock-kcm` | KDE settings module — **built in Phase 8**, see below |
 
 Splitting the models out matters: it keeps the license accounting clean, lets a
 security update to the daemon ship without re-shipping 37 MB, and lets someone swap
@@ -346,8 +346,11 @@ packages for every crate, or an explicit vendoring exception. Realistic sequenci
 
 ### As built, 2026-08-31 (P7-b)
 
-Three packages, not four — `plasma-faciolock-kcm` is the "(later)" row in the table above
-and has no v1 deliverable behind it.
+Three packages, not four — `plasma-faciolock-kcm` was the "(later)" row in the table above
+and had no v1 deliverable behind it. **Phase 8 built it; the fourth package arrives in
+`0.1.0~ppa2`.** Everything below about vendoring, `3.0 (native)` and the offline builders is
+unchanged by it, with one addition: the KCM is C++ and CMake, so its build dependencies must
+be *archive-available* rather than vendored. There is no `cargo vendor` for `libkf6kcmutils-dev`.
 
 **Launchpad's builders have no network**, which is the constraint that decided the shape.
 Every crate the workspace needs must be inside the source package before upload, and
@@ -419,6 +422,41 @@ phase's own exit criterion on the first command after the install:
 `dh_installsystemd` also runs once per binary package and errors on a unit the current
 package does not ship, so both calls are scoped with `-pfaciolock` and followed by
 `--remaining-packages`.
+
+## Desktop compatibility
+
+Distinct from [15](15-hardware-compatibility.md), which is about cameras. This table is about
+lock screens, and it has the same rule: a row says what was *observed*, or it says untested.
+
+| Desktop | Display manager | Lock screen | Face unlock |
+|---|---|---|---|
+| Plasma 6.6.5 | SDDM | `kscreenlocker_greet` | **observed twice** — 2026-08-31 19:20:33 hand-installed, 23:02:00 packaged. Both journal lines carry `pid … uid 1000`, an unprivileged session process asking about itself |
+| GNOME | GDM | `gnome-shell` | **untested.** Nothing is installed and nothing is claimed |
+
+### Why GNOME is untested rather than "probably fine" (Phase 8)
+
+It would have been easy to add `gdm-password` to a table and call it support. Two things
+decide whether it works and neither can be answered without GDM on a machine, so both are
+written down instead of guessed:
+
+1. **Does `/etc/pam.d/gdm-password` include `common-auth`?** `pam-auth-update` edits
+   `common-auth` and `common-account` and nothing else, which is the whole reason one profile
+   reaches all six services in the table above ([data/pam-configs/README.md](../data/pam-configs/README.md)
+   checked this by reading the six files, not by assuming). If GDM's stack includes it, the
+   code change for GNOME support is **zero**. If it does not, the profile needs a service that
+   `pam-auth-update` cannot reach and the answer is a different shape entirely.
+
+2. **What euid does GDM's PAM conversation run as?** `serve::may_ask` is
+   `peer_uid == 0 || (subject == Some(peer_uid) && matches!(op, Op::Auth | Op::Status))` —
+   root may ask about anybody, anybody else may ask about themselves, and there is no third
+   case. If `gdm-session-worker` runs as root the module is answered like `sudo` is. If the
+   greeter asks as the `gdm` system user it is structurally refused, because `gdm` is neither
+   root nor the subject — the same wall [Q10](09-roadmap.md#the-lock-screen-cannot-reach-the-socket-either-q10)
+   measured for `kscreenlocker_greet`, and one that adding `gdm` to `faciolock-auth` does not
+   climb, since the group only buys the right to ask about *yourself*.
+
+The commands are `cat /etc/pam.d/gdm-password` and watching the euid of `gdm-session-worker`
+during a login. Naming them costs nothing now and is most of the work later.
 
 ## The upstreaming checklist
 

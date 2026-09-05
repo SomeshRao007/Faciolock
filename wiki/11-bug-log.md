@@ -9,6 +9,7 @@ to fix.
 
 | # | Bug | Severity | Status |
 |---|---|---|---|
+| [B32](#b32) | **A closed stdin enrols three identical poses.** `read_line` answers `Ok(0)` at EOF and `prompt()` discarded the answer, so `enroll < /dev/null` fired three camera bursts back to back with nobody moving between them, and saved the result as a three-pose enrolment | **high** | fixed; `prompt()` returns false on EOF and `enroll` abandons. Predates the GUI by three phases and was found by asking what a Stop button would do |
 | [B31](#b31) | **The package shipped the sysusers file and never ran it — twice, for two different reasons.** `dh_installsysusers` reads only `debian/package.sysusers`, *and* it is not in this debhelper's `dh` sequence at all. So the `faciolock` user is never created and the daemon cannot start | **high** | fixed; `debian/faciolock.sysusers` **and** an explicit `execute_after_dh_install: dh_installsysusers`. The build was green through both wrong versions |
 | [B30](#b30) | **`dh_clean` deleted the vendored tree's integrity data.** Every `cargo vendor` crate carries a `Cargo.toml.orig` that `.cargo-checksum.json` hashes, and `dh_clean` sweeps `*.orig` as patch leftovers | medium | fixed; `dh_clean -X.orig`. Found by the first package build, which is what package builds are for |
 | [B29](#b29) | **Every cron job lit the IR emitter for 30 s.** The account hook activates the daemon and activation warmed the camera, so a `run-parts` at :17 turned the lens on | **high** | fixed; the startup warm is deleted, the camera opens only for a request that needs it |
@@ -38,6 +39,49 @@ to fix.
 | [B3](#b3) | `2>/dev/null` hid a missing binary as "no evidence" | medium | documented |
 | [B2](#b2) | Half the `/dev/videoN` nodes are not cameras | low | fixed |
 | [B1](#b1) | Dead conditional in `build_pairs` | trivial | removed |
+
+---
+
+## B32 — A closed stdin enrols three identical poses {#b32}
+
+**Severity: high.** The enrolment loop pauses between poses so you can turn your head:
+
+```rust
+print!("{instruction}  [Enter] ");
+let _ = std::io::stdout().flush();
+let mut line = String::new();
+let _ = std::io::stdin().read_line(&mut line);   // <- the bug is the `let _`
+```
+
+`read_line` returns `Ok(0)` at end of file. It is not an error, so it does not surface as
+one; the return value was discarded, `prompt()` returned, and the loop went straight to
+`Op::Enroll`. With stdin closed there is nothing to block on **ever again**, so all three
+poses fire back to back — three real camera bursts, roughly a second apart, of a person who
+was never told to move — and the daemon writes them as a complete enrolment.
+
+The resulting template is three near-identical samples of one pose. Every one of them is
+genuinely yours, so nothing rejects it and nothing logs a complaint. What it costs is the
+thing the three poses were for: an enrolment that only recognises you sitting exactly as you
+were at that second, which reads later as a bad false-reject rate rather than as a bad
+enrolment.
+
+`faciolockctl enroll < /dev/null` has done this since Phase 5. Nothing found it because
+nothing had reason to run enrolment without a terminal, and it never fails — it succeeds at
+the wrong thing.
+
+**Found by asking what a button would do.** The KCM's Stop button cannot signal its own
+child: after `pkexec` authorises, `faciolockctl` runs as root and an unprivileged panel
+gets `EPERM` from `terminate()`. The one stop an unprivileged parent *does* have over a root
+child is closing its stdin — which is what sent us to look at what a closed stdin does, and
+the answer was three camera bursts.
+
+**Fix:** `prompt()` returns `false` on `Ok(0)` and `enroll` abandons with
+`stdin closed after N of 3 poses`. That makes the panel's Stop button a clean abort rather
+than an accidental speed-run, and it makes the CLI honest for anyone piping into it.
+
+The class is the one [B3](#b3) is also in: a discarded result that is not an error. `let _ =`
+on an I/O call is fine for a `write` whose failure changes nothing, and is a bug on a `read`
+whose count is the only signal that there is nothing left to read.
 
 ---
 

@@ -5,7 +5,12 @@ Maintainer: Somesh Rao <cokasomeshrao@outlook.com>
 Build-Depends: debhelper-compat (= 13),
                cargo,
                rustc (>= 1.85),
-               libpam0g-dev
+               libpam0g-dev,
+               cmake,
+               extra-cmake-modules (>= 6.0.0),
+               libkf6kcmutils-dev (>= 6.0.0),
+               libkf6coreaddons-dev (>= 6.0.0),
+               qt6-declarative-dev (>= 6.5.0)
 Standards-Version: 4.7.0
 Homepage: https://github.com/SomeshRao007/Faciolock
 Rules-Requires-Root: no
@@ -48,6 +53,28 @@ Description: IR face authentication for Linux - PAM module
  "Default: no", so nothing authenticates by face until an administrator runs
  pam-auth-update and enables it explicitly. Recovery instructions for a
  misbehaving module are in /usr/share/doc/libpam-faciolock/README.Debian.
+
+Package: plasma-faciolock-kcm
+Architecture: any
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         faciolock (= ${binary:Version}),
+         libkf6kcmutils-bin
+Description: IR face authentication for Linux - KDE Plasma settings module
+ A System Settings page for Faciolock, and the same page as a "Face Unlock"
+ entry in the application launcher. It shows whether you are enrolled and
+ whether face authentication is switched on, and it enrols, tests and removes
+ your own face.
+ .
+ It holds no privilege of its own. Every action runs faciolockctl through
+ pkexec against the polkit action the daemon package already ships, so the
+ panel can do exactly what you could do from a terminal and nothing more. It
+ will not switch face authentication on or off; that is pam-auth-update's job
+ and giving a settings page the power to rewrite the PAM stack is a wider
+ boundary than a settings page needs.
+ .
+ The dependency on libkf6kcmutils-bin is kcmshell6, which the launcher entry
+ runs.
 
 Package: faciolock-models
 Architecture: all
