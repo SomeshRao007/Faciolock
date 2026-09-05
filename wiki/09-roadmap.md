@@ -847,8 +847,114 @@ was checked with no root and nothing installed. It came up correctly on its unha
 `/usr/bin/faciolockctl is not installed`, which was true, since Phase 7's purge took it — with
 all three action buttons disabled and no QML warnings.
 
-**Exit:** a face enrolled from a GUI, by someone who never opened a terminal — then the four
-packages built, `lintian` clean on both `.changes`, installed and purged.
+### The exit, and how the journal proves a click (2026-09-05)
+
+**Exit: met at 20:00:55.** A face enrolled from a GUI, by someone who never opened a terminal.
+
+Proving it needed a moment's thought, because the obvious evidence is not evidence. A panel
+enrolment runs `pkexec faciolockctl enroll`, and `sudo faciolockctl enroll` runs the same
+binary as the same uid — the daemon writes `uid 0` for both and cannot tell them apart. So
+the journal alone says nothing about which one ran.
+
+Two things together do say it:
+
+```text
+20:00:43  Started faciolock.service            <- socket activation, by the panel's request
+20:00:45  enrol uid=1000 pose=1/3  pid 70441  elapsed=1954
+20:00:50  enrol uid=1000 pose=2/3  pid 70441  elapsed=607
+20:00:55  enrol uid=1000 pose=3/3  pid 70441  elapsed=608
+20:00:55  enrol uid=1000 event=template-written poses=3 embeddings=9
+```
+
+**The poses are five seconds apart.** `elapsed` is the daemon's own work — 607 ms, 608 ms —
+so the other four and a half seconds are a person reading a banner, moving, and pressing a
+button. And the installed binary carries [B32](11-bug-log.md#b32)'s fix, which is what makes
+that argument close: with stdin at EOF this enrolment would have **aborted** at pose 1 rather
+than completing. It completed, so `read_line` returned three times, so `capture()` wrote three
+newlines, so the button was pressed three times. Before B32 was fixed, a completed enrolment
+would have proven nothing at all — an empty stdin produced the same four log lines.
+
+The panel's own log pane is the other half, and it reads exactly as designed:
+
+```text
+Look straight at the camera.  [Enter]   captured  (1/3, 1954 ms)
+Turn your head slightly to the left.  [Enter]   captured  (2/3, 607 ms)
+Enrolled csr. Check it with:  sudo faciolockctl test csr
+```
+
+No `[pose 1/3]` lines appear, which is correct: `readTask()` consumes markers into the banner
+instead of logging them. And the prompt sharing a line with the reply is the newline-less
+`print!` being completed by the next `println!` — one whole line, logged once.
+
+| Leg | State |
+|---|---|
+| `faciolockctl status`, unprivileged, live daemon | **observed** — `enrolled csr`, exit 0, no password prompt. The first caller of the `may_ask` path P6-d opened, four phases after it was opened |
+| …and its refusal | **observed** — dropped from `faciolock-auth` and checked with `sudo -u csr`, because a re-run in the same shell keeps its supplementary groups until a fresh login and would have passed for the wrong reason. `refused this user — you are not root and not in the faciolock-auth group` |
+| The panel reads true | **observed** — "Enrolled" against `status`, "Off" against `grep -c pam_faciolock /etc/pam.d/common-auth`, each checked independently rather than against each other |
+| **Opening the panel does not light the emitter** | **observed.** The `status` call activated the daemon at 19:55:33 and it logged two lines, `models verified` and `listening`. No warm, no frames. [B29](11-bug-log.md#b29)/P6-e holds through a caller written three phases later, which is the only way that fix was ever going to be tested again |
+| System Settings and the launcher | **observed** — `systemsettings --list` lists `kcm_faciolock`; the launcher entry installs and `desktop-file-validate` passes |
+| **Enrol from the panel** | **observed 20:00:55**, above |
+| **…and again from the packaged install** | **observed 20:20:21.** Four `.deb`s installed over a removed hand-install, then an enrolment through the panel: `elapsed=2043 / 654 / 772`, poses two and six seconds apart, and the panel's log pane carries the same three numbers. `dpkg -S` puts `/usr/bin/faciolockctl` in `faciolock` and both KCM files in `plasma-faciolock-kcm`; nothing shadows the units in `/etc/systemd/system`. The enrolment written at 20:00 by the hand-install was still readable at 20:20 through the packaged binary, which is the upgrade-persistence path again, for free |
+| **B33's dependencies resolve** | **observed** — `apt` installed all four packages pulling *nothing* new. That is the fix working and the reason the bug was invisible: every `qml6-module-*` this panel imports was already on the machine, and would not be on a fresh one |
+| Four packages build | **observed** — `faciolock`, `libpam-faciolock`, `faciolock-models`, `plasma-faciolock-kcm`, plus three `-dbgsym` |
+| `lintian` on **both** `.changes` | **clean, on the fourth attempt.** The first run was not, and what it found was not what it warned about — see below. Two justified overrides, and the override was confirmed *shipped* (`/usr/share/lintian/overrides/plasma-faciolock-kcm`, both lines) rather than inferred from the warnings going quiet, because [B31](11-bug-log.md#b31) is what a debhelper that does not run looks like |
+| A source package that could be uploaded | **observed** — `faciolock_0.1.0~ppa2.dsc` + a 47 MB `.tar.xz` declaring all four binaries, with all five `kcm/` files inside it. Checked rather than assumed: the tarball is assembled from `git ls-files`, so an uncommitted source file disappears without a word and Launchpad builds something other than what was tested |
+
+### The package worked here and would have been blank anywhere else (B33)
+
+`lintian` came back with two warnings, both `desktop-command-not-in-package`, for `kcmshell6`
+and `systemsettings`. Both are about `Exec=` lines and neither is the bug.
+
+Chasing them meant asking how a KCM package is *supposed* to declare itself, and the answer
+was already installed: `dpkg -s plasma-firewall` lists six `qml6-module-*` packages in its
+`Depends`. Ours listed none. `ui/main.qml` imports five QML modules and the built package
+depended on **not one of them**, because `kcmutils_add_qml_kcm` compiles `ui/` into a Qt
+resource inside the plugin, where the imports are string data and `dh_shlibdeps` — which reads
+`DT_NEEDED` out of ELF — cannot see them. The C++ half of a QML KCM declares its dependencies.
+The QML half does not.
+
+The package installs, registers, and launches to a **blank page**, with QML import errors on a
+stderr nobody reads, because settings panels are not started from terminals. And **it cannot
+fail on the machine that builds it** — those modules arrive with Plasma. Every observation in
+the table above is true and none of it was evidence about anybody else's machine.
+[B33](11-bug-log.md#b33).
+
+That is the third time in two phases that the answer was on the disk rather than in a memory:
+the multi-arch fields off `dpkg-query`, the CMake target name out of
+`KF6KCMUtilsTargets.cmake`, and now the dependency list off a package that had the problem
+first.
+
+The two warnings that started it are a **false positive**, and lintian's own tag text says so:
+*"does not match any of the executables shipped in the package."* It looks at this package and
+not at `Depends`. A KCM ships no executable on purpose. Overridden — and unlike Phase 7's
+three source overrides, this one is claimed as a fix, because the dependency exists and is
+declared and lintian simply cannot see into another package to find it.
+
+### The package build also found a flaky test, which the local runs could not
+
+The build after the B33 fix **failed**, on a test rather than on packaging:
+
+```text
+---- tests::the_subject_defaults_to_the_invoking_user_not_root ----
+flags are not names: "no username given, and $SUDO_USER is not set"
+```
+
+Two tests were mutating `$SUDO_USER` — the existing one sets it and asserts on it, and P8-b's
+new one removes it — and `cargo test` runs them in parallel threads that share an environment.
+Two owners of one global. It passed three times here before failing in the build, which is
+what a race does rather than what a broken test does.
+
+Fixed by merging them: one test owns the variable. Five consecutive local runs green
+afterwards, because one green run proves nothing about a race.
+
+Worth recording for a reason that outlives the test: `override_dh_auto_test` runs the whole
+suite inside every package build, which is a fourth execution environment on top of the three
+`cargo test` already sees, and it is the one that ran the tests in an order the others did not.
+
+**What B33 costs the phase, stated rather than buried:** the clean-VM install was traded away
+at [Phase 7's exit](#the-models-are-gitignored-and-the-tarball-needs-them) for a
+reference-machine install, on the argument that the removal half is the stronger half. B33 is
+exactly the defect that trade cannot catch, and it is now owed twice.
 
 ---
 

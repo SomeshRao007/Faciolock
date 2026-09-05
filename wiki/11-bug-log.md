@@ -9,6 +9,7 @@ to fix.
 
 | # | Bug | Severity | Status |
 |---|---|---|---|
+| [B33](#b33) | **The KCM package declared none of the five QML modules it imports.** They live inside a Qt resource in the plugin, where `dh_shlibdeps` cannot see them, so the package installs and launches and renders **a blank page** on any machine without the whole Plasma desktop already on it | **high** | fixed; five `qml6-module-*` packages plus `systemsettings` declared by hand. Green on the build machine, which is the only machine that could not show it |
 | [B32](#b32) | **A closed stdin enrols three identical poses.** `read_line` answers `Ok(0)` at EOF and `prompt()` discarded the answer, so `enroll < /dev/null` fired three camera bursts back to back with nobody moving between them, and saved the result as a three-pose enrolment | **high** | fixed; `prompt()` returns false on EOF and `enroll` abandons. Predates the GUI by three phases and was found by asking what a Stop button would do |
 | [B31](#b31) | **The package shipped the sysusers file and never ran it — twice, for two different reasons.** `dh_installsysusers` reads only `debian/package.sysusers`, *and* it is not in this debhelper's `dh` sequence at all. So the `faciolock` user is never created and the daemon cannot start | **high** | fixed; `debian/faciolock.sysusers` **and** an explicit `execute_after_dh_install: dh_installsysusers`. The build was green through both wrong versions |
 | [B30](#b30) | **`dh_clean` deleted the vendored tree's integrity data.** Every `cargo vendor` crate carries a `Cargo.toml.orig` that `.cargo-checksum.json` hashes, and `dh_clean` sweeps `*.orig` as patch leftovers | medium | fixed; `dh_clean -X.orig`. Found by the first package build, which is what package builds are for |
@@ -39,6 +40,62 @@ to fix.
 | [B3](#b3) | `2>/dev/null` hid a missing binary as "no evidence" | medium | documented |
 | [B2](#b2) | Half the `/dev/videoN` nodes are not cameras | low | fixed |
 | [B1](#b1) | Dead conditional in `build_pairs` | trivial | removed |
+
+---
+
+## B33 — The KCM package declared none of the QML modules it imports {#b33}
+
+**Severity: high**, and it is [B31](#b31)'s shape again: a package that builds green, installs
+green, and does not work on any machine that is not this one.
+
+`ui/main.qml` opens with five imports:
+
+```qml
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import org.kde.kirigami
+import org.kde.kcmutils
+```
+
+Every one of those is a separate Debian package — `qml6-module-qtquick`,
+`qml6-module-qtquick-controls`, `qml6-module-qtquick-layouts`,
+`qml6-module-org-kde-kirigami`, `qml6-module-org-kde-kcmutils` — and the built package
+depended on **none** of them:
+
+```text
+Depends: libc6, libkf6coreaddons6, libkf6kcmutilscore6, libkf6kcmutilsquick6,
+         libqt6core6t64, libstdc++6, faciolock, libkf6kcmutils-bin
+```
+
+That list is `dh_shlibdeps`'s work, and `dh_shlibdeps` reads `DT_NEEDED` out of an ELF file.
+`kcmutils_add_qml_kcm` bakes `ui/` into a **Qt resource compiled into the plugin**, so the
+imports are string data inside the `.so`. There is no ELF entry for them and nothing scans for
+one. The C++ half of a QML KCM declares its dependencies; the QML half does not.
+
+The failure is quiet in the worst way. The package installs. The KCM registers.
+`systemsettings --list` finds it. It launches — and the page is **blank**, with QML import
+errors on stderr that nobody is reading, because a settings panel is not run from a terminal.
+
+**It cannot fail on the machine that builds it.** Every one of those modules is already
+installed here; they arrive with Plasma. So the local install worked, the panel rendered, the
+enrolment ran, and the exit criterion was met — all of it true, and none of it evidence about
+anyone else's machine.
+
+**Found by `lintian` disagreeing about something else.** Two warnings came back —
+`desktop-command-not-in-package` for `kcmshell6` and for `systemsettings` — which are about
+`Exec=` lines, not QML. Chasing them meant looking at how a real KCM package declares itself,
+and `plasma-firewall`'s `Depends` on this machine has six `qml6-module-*` entries in it. The
+tag that fired was not the bug; reading the answer next to it was.
+
+Same move as Phase 7's multi-arch fields and Phase 8's CMake target name: **the answer was
+already installed on the machine.** `dpkg -s` on a package that solved it first is worth more
+than a guess, and this project has now used that three times.
+
+**Fix:** the five modules and `systemsettings` declared by hand in `debian/control`, with a
+comment saying why they cannot be derived. The real defence is a clean-chroot or VM install,
+which is the Phase 7 exit leg that was traded away for a reference-machine install and is now
+owed twice.
 
 ---
 

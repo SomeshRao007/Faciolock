@@ -183,8 +183,10 @@ verdict, so the audit log cannot overstate what was actually checked.
 You need an **IR camera**. Check first — [`wiki/15`](wiki/15-hardware-compatibility.md)
 has the one-liner, and an RGB webcam will not do.
 
-Three packages: `faciolock` (daemon, CLI, units), `libpam-faciolock` (the module and its
-`pam-auth-update` profile), `faciolock-models` (the weights). Build them from a checkout:
+Four packages: `faciolock` (daemon, CLI, units), `libpam-faciolock` (the module and its
+`pam-auth-update` profile), `faciolock-models` (the weights), and `plasma-faciolock-kcm`
+(the KDE settings panel, which is optional — everything it does, `faciolockctl` does).
+Build them from a checkout:
 
 ```bash
 ./tools/mk-source-package.sh --binary
@@ -279,7 +281,8 @@ crates/faciolock-pam/      pam_faciolock.so -- libc + the IPC crate, and nothing
 crates/faciolock-ipc/      the wire protocol both ends share
 crates/faciolock-cli/      faciolockctl: enrol, diagnose, test, bench
 data/                      systemd units, sysusers, polkit, the pam-configs profile
-debian/                    the three binary packages
+debian/                    the four binary packages
+kcm/                       the KDE settings panel (C++/QML, CMake, not in the workspace)
 corpus/                    recorded IR captures (.gray gitignored, sidecars committed)
 models/                    vendored ONNX + per-file licence status
 spikes/                    Phase 0 throwaway measurement tools

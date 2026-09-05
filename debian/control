@@ -59,7 +59,13 @@ Architecture: any
 Depends: ${shlibs:Depends},
          ${misc:Depends},
          faciolock (= ${binary:Version}),
-         libkf6kcmutils-bin
+         libkf6kcmutils-bin,
+         systemsettings,
+         qml6-module-qtquick,
+         qml6-module-qtquick-controls,
+         qml6-module-qtquick-layouts,
+         qml6-module-org-kde-kirigami,
+         qml6-module-org-kde-kcmutils
 Description: IR face authentication for Linux - KDE Plasma settings module
  A System Settings page for Faciolock, and the same page as a "Face Unlock"
  entry in the application launcher. It shows whether you are enrolled and
@@ -73,8 +79,12 @@ Description: IR face authentication for Linux - KDE Plasma settings module
  and giving a settings page the power to rewrite the PAM stack is a wider
  boundary than a settings page needs.
  .
- The dependency on libkf6kcmutils-bin is kcmshell6, which the launcher entry
- runs.
+ Two kinds of dependency here are not found by dh_shlibdeps and are listed by
+ hand. The five qml6-module-* packages are what the panel imports at runtime;
+ those imports live inside a Qt resource in the plugin, where no ELF scan can
+ see them, and without them the page loads and renders nothing. The two
+ programs are kcmshell6 for the launcher entry and systemsettings for the
+ System Settings entry.
 
 Package: faciolock-models
 Architecture: all
