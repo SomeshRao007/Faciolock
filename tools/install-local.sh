@@ -36,6 +36,9 @@ if [ "${1:-}" = "--remove" ]; then
 	rm -f /usr/lib/sysusers.d/faciolock.conf /usr/share/pam-configs/faciolock
 	rm -f "$secdir/pam_faciolock.so" /usr/bin/faciolockctl
 	rm -f /usr/share/polkit-1/actions/org.faciolock.policy
+	rm -f /usr/share/applications/org.faciolock.panel.desktop
+	rm -f /usr/share/applications/kcm_faciolock.desktop
+	rm -f /usr/lib/*/qt6/plugins/plasma/kcms/systemsettings/kcm_faciolock.so
 	rm -rf "$libexec" "$share"
 	systemctl daemon-reload
 	echo
@@ -97,6 +100,17 @@ install -s -m 0644 "$root/target/$profile/libpam_faciolock.so" "$secdir/pam_faci
 install -d -m 0755 /usr/share/pam-configs
 install -m 0644 "$root/data/pam-configs/faciolock" /usr/share/pam-configs/faciolock
 
+# Built here rather than by cargo, so it is skipped when the KF6 development packages are
+# absent instead of failing an install that has nothing else wrong with it. The panel is the
+# one part of this tree that is optional at runtime.
+if cmake -S "$root/kcm" -B "$root/target/kcm" -DCMAKE_INSTALL_PREFIX=/usr >/dev/null 2>&1; then
+	echo "KDE settings module"
+	cmake --build "$root/target/kcm" >/dev/null
+	cmake --install "$root/target/kcm" >/dev/null
+else
+	echo "KDE settings module -- skipped, no KF6 development packages"
+fi
+
 echo "systemd"
 install -m 0644 "$root/data/systemd/faciolock.socket" /etc/systemd/system/faciolock.socket
 install -m 0644 "$root/data/systemd/faciolock.service" /etc/systemd/system/faciolock.service
@@ -116,6 +130,7 @@ echo
 echo "  faciolockctl diagnose --write     find the camera, record the tier"
 echo "  faciolockctl enroll \$USER         three poses"
 echo "  faciolockctl test                 without touching any PAM file"
+echo "  kcmshell6 kcm_faciolock           the same three, in a window"
 echo
 echo "for anything that authenticates in your own session -- the KDE lock screen above all --"
 echo "you also have to join the group the socket is gated on, and log out and back in:"
