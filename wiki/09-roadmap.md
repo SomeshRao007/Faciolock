@@ -954,6 +954,45 @@ Worth recording for a reason that outlives the test: `override_dh_auto_test` run
 suite inside every package build, which is a fourth execution environment on top of the three
 `cargo test` already sees, and it is the one that ran the tests in an order the others did not.
 
+### B33, shown rather than argued — in a container, on this machine (2026-09-05)
+
+The VM was owed for two jobs and they need different tools. The runtime-dependency half —
+"does the panel work with only what we declared?" — turns out to be testable here, because Qt
+ships `libqoffscreen.so`: `QT_QPA_PLATFORM=offscreen` renders with no display, so QML genuinely
+loads and import failures genuinely surface. `ubuntu:26.04`, nothing installed, the four
+`.deb`s:
+
+| | |
+|---|---|
+| **A — as declared** | `apt install` exit 0, and it **pulled all five `qml6-module-*` packages in** on a machine that had none of them. `kcmshell6` exit 124 — still up when the timeout fired. Stderr: a locale notice, nothing else |
+| **B — one declared module forcibly removed** | `dpkg --remove --force-depends qml6-module-org-kde-kirigami`, which leaves the KCM installed and intact: exactly the state B33 shipped in |
+
+B is here because the description of B33 — "installs, registers, launches, blank page" — was
+**reasoning, and reasoning is not what this project writes down as observed.** What it printed:
+
+```text
+plasma-faciolock-kcm: install ok installed      <- dpkg is perfectly happy
+kcmshell6 exit: 124                             <- and the window stayed up
+kf.kcmutils: Error loading QML file qrc:/kcm/kcm_faciolock/main.qml
+kf.kcmutils:     main.qml:8:1: module "org.kde.kirigami" is not installed
+```
+
+Two things it settles that the argument had only guessed. The process **does not exit
+non-zero** — it runs, shows nothing, and keeps running, so no watchdog, exit code or `dpkg`
+status anywhere in the system registers a complaint. And the path is `qrc:/`, which is the
+mechanism itself: the QML is a Qt resource compiled into the plugin, which is exactly why
+`dh_shlibdeps` cannot see the imports.
+
+The standing guard is `tools/check-qml-deps.sh`, first thing in `mk-source-package.sh`. It
+resolves each `import` to its owning package via `dpkg -S` on the module's `qmldir` and fails
+the build if one is missing from `Depends` — verified in both directions, because a check that
+has only ever passed is not evidence. The container proves *this* package is right today; the
+script is what stops the same bug arriving with the next `import`.
+
+**What the container does not close.** It has no systemd, so socket activation, the units, and
+`sysusers` creating the `faciolock` user on a first install are all still untested by it. The
+VM is still owed — for less than before, and for the half that has not yet bitten.
+
 **What B33 costs the phase, stated rather than buried:** the clean-VM install was traded away
 at [Phase 7's exit](#the-models-are-gitignored-and-the-tarball-needs-them) for a
 reference-machine install, on the argument that the removal half is the stronger half. B33 is

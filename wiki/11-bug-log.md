@@ -93,9 +93,47 @@ already installed on the machine.** `dpkg -s` on a package that solved it first 
 than a guess, and this project has now used that three times.
 
 **Fix:** the five modules and `systemsettings` declared by hand in `debian/control`, with a
-comment saying why they cannot be derived. The real defence is a clean-chroot or VM install,
-which is the Phase 7 exit leg that was traded away for a reference-machine install and is now
-owed twice.
+comment saying why they cannot be derived.
+
+**The standing guard is `tools/check-qml-deps.sh`**, run first thing in
+`mk-source-package.sh`. It reads every `import` out of `main.qml`, resolves each to its owning
+package with `dpkg -S` on the module's `qmldir`, and fails the build if one is not in
+`Depends`. It was checked in both directions: deleting `qml6-module-org-kde-kirigami` from
+`debian/control` makes it exit 1 and name the package. A check that has only ever passed is
+not evidence.
+
+That is the part a one-time clean-machine test cannot do. The container proves *this* package
+is right today; the script is what stops the same bug arriving with the next `import`.
+
+### Verified in a clean container, both directions
+
+`ubuntu:26.04`, nothing installed, the four `.deb`s and `QT_QPA_PLATFORM=offscreen` — the Qt
+platform plugin that renders with no display, which is what makes this testable without a VM:
+
+| | |
+|---|---|
+| **A — as declared** | `apt install` exit 0, and it **pulled all five `qml6-module-*` packages in**, on a machine that had none of them. `kcmshell6` exit 124, meaning it was still up when the timeout fired. Stderr: a locale notice and nothing else. QML loaded |
+| **B — one declared module forcibly removed** | `dpkg --remove --force-depends qml6-module-org-kde-kirigami`, which leaves `plasma-faciolock-kcm` installed and intact — precisely the state this package shipped in |
+
+B is there because the paragraph above it — "installs, registers, launches, blank page" — was
+**reasoning, not observation**, and this project does not get to write those the same way. What
+B printed:
+
+```text
+plasma-faciolock-kcm: install ok installed      <- dpkg is perfectly happy
+kcmshell6 exit: 124                             <- and the window stayed up
+kf.kcmutils: Error loading QML file qrc:/kcm/kcm_faciolock/main.qml
+kf.kcmutils:     main.qml:8:1: module "org.kde.kirigami" is not installed
+```
+
+Two things the argument had only guessed at. The process **does not exit non-zero** — it runs,
+shows nothing, and keeps running, so no exit code, watchdog or `dpkg` status anywhere
+registers a complaint. And the path is `qrc:/`, which is the mechanism itself: the QML is a Qt
+resource compiled into the plugin, which is exactly why `dh_shlibdeps` cannot see it.
+
+**Still owed: a real VM.** A container has no systemd, so socket activation, the units and the
+`faciolock` user on first install are all untested by it. What the container closes is the
+runtime-dependency half, which is the half that bit.
 
 ---
 
