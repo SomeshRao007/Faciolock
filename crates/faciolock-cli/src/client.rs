@@ -49,9 +49,14 @@ fn describe(socket: &Path, e: std::io::Error) -> String {
         std::io::ErrorKind::ConnectionRefused => {
             format!("{} exists but nothing is listening — faciolockd is not running", socket.display())
         }
-        std::io::ErrorKind::PermissionDenied => {
-            format!("{} is not readable by this user — run as root", socket.display())
-        }
+        // P6-d took the socket from 0600 root:root to 0660 root:faciolock-auth, so "run as
+        // root" stopped being the whole answer -- and it is the wrong half to lead with for
+        // anything a session runs.
+        std::io::ErrorKind::PermissionDenied => format!(
+            "{} refused this user — you are not root and not in the faciolock-auth group.\n\
+             Add yourself with:  sudo gpasswd -a $USER faciolock-auth  (then log out and in)",
+            socket.display()
+        ),
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
             "the daemon did not answer in time".into()
         }

@@ -1,0 +1,10 @@
+{
+    "KPlugin": {
+        "Description": "Sign in with the infrared camera",
+        "Icon": "face-smile",
+        "Name": "Face Unlock"
+    },
+    "X-KDE-System-Settings-Parent-Category": "system-administration",
+    "X-KDE-Weight": 60,
+    "X-KDE-Keywords": "face,unlock,biometric,infrared,login,faciolock"
+}

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Face Unlock
+GenericName=Face authentication
+Comment=Enrol your face and check that infrared sign-in works
+Icon=face-smile
+Exec=kcmshell6 kcm_faciolock
+Terminal=false
+Categories=Qt;KDE;Settings;Security;
+Keywords=face;unlock;biometric;infrared;login;faciolock;
+X-KDE-OnlyShowOnQtPlatforms=xcb;wayland;
