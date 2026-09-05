@@ -570,15 +570,16 @@ mod tests {
 
         unsafe { std::env::remove_var("SUDO_USER") };
         assert!(subject(&[]).is_err(), "no name and no SUDO_USER must not silently pick one");
-    }
 
-    // pkexec does not set SUDO_USER, and subject() errors without it. `status` is the one
-    // command a session runs unprivileged, so it falls back to the caller rather than failing.
-    #[test]
-    fn status_defaults_to_the_caller_when_sudo_user_is_absent() {
-        unsafe { std::env::remove_var("SUDO_USER") };
-        let expected = passwd::name_of(unsafe { libc::geteuid() }).expect("this uid has an account");
-        assert_eq!(me(&[]).expect("falls back to the caller"), expected);
+        // `me` is tested here rather than in its own test because both halves mutate
+        // $SUDO_USER, and cargo runs tests in parallel threads that share the environment.
+        // Two owners of one global is a race, and it passed three times before failing
+        // inside a package build.
+        //
+        // pkexec does not set SUDO_USER, so `status` -- the one command a session runs
+        // unprivileged -- falls back to the caller instead of erroring the way subject does.
+        let caller = passwd::name_of(unsafe { libc::geteuid() }).expect("this uid has an account");
+        assert_eq!(me(&[]).expect("falls back to the caller"), caller);
         assert_eq!(me(&["someone"]).expect("explicit still wins"), "someone");
     }
 
