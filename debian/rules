@@ -1,0 +1,63 @@
+#!/usr/bin/make -f
+
+include /usr/share/dpkg/architecture.mk
+# The KCM is built by a hand-rolled cmake call, not dh_auto_build, so nothing injects the
+# distribution's hardening and reproducibility flags for it. This does -- but only with the
+# export set first: buildflags.mk defines make variables, and a child cmake process sees
+# nothing unless DPKG_EXPORT_BUILDFLAGS puts them in the environment.
+DPKG_EXPORT_BUILDFLAGS := 1
+include /usr/share/dpkg/buildflags.mk
+
+export CARGO_HOME = $(CURDIR)/debian/cargo-home
+export CARGO_NET_OFFLINE = true
+export SOURCE_DATE_EPOCH ?= $(shell dpkg-parsechangelog -STimestamp)
+
+KCM_BUILD = debian/kcm-build
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release --workspace --locked
+	cmake -S kcm -B $(KCM_BUILD) -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=None
+	cmake --build $(KCM_BUILD)
+
+override_dh_auto_test:
+	cargo test --release --workspace --locked
+
+override_dh_auto_install:
+	install -D -m 0755 target/release/faciolockd \
+	  debian/faciolock/usr/libexec/faciolock/faciolockd
+	install -D -m 0755 target/release/faciolockctl \
+	  debian/faciolock/usr/bin/faciolockctl
+	install -D -m 0644 target/release/libpam_faciolock.so \
+	  debian/libpam-faciolock/usr/lib/$(DEB_HOST_MULTIARCH)/security/pam_faciolock.so
+	DESTDIR=$(CURDIR)/debian/plasma-faciolock-kcm cmake --install $(KCM_BUILD)
+
+# dh_installsysusers is NOT in this debhelper's binary sequence -- `dh binary
+# --no-act` lists dh_installtmpfiles and dh_installsystemduser and not this one.
+# Without the explicit call the sysusers file ships and nothing ever reads it,
+# so the faciolock user is never created and the daemon cannot start. The build
+# is green either way; see wiki/11 B31.
+execute_after_dh_install:
+	dh_installsysusers
+
+# The socket gets the default treatment -- enabled, started, and restarted after
+# an upgrade, which is the only thing that rebinds a changed SocketMode or
+# SocketGroup. The service gets --no-start: starting faciolockd directly hands it
+# no inherited fd, so it self-binds, and then the socket unit's own inode is the
+# one nothing is listening on.
+override_dh_installsystemd:
+	dh_installsystemd -pfaciolock faciolock.socket
+	dh_installsystemd -pfaciolock --no-start faciolock.service
+	dh_installsystemd --remaining-packages
+
+override_dh_auto_clean:
+	rm -rf target debian/cargo-home $(KCM_BUILD)
+
+# dh_clean sweeps *.orig as patch leftovers, and `cargo vendor` writes a
+# Cargo.toml.orig into every crate that .cargo-checksum.json then hashes. Left
+# alone it deletes the vendored tree's integrity data and the build fails on the
+# first crate it reaches.
+override_dh_clean:
+	dh_clean -X.orig

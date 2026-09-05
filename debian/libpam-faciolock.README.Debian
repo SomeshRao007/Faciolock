@@ -1,0 +1,69 @@
+libpam-faciolock for Debian and Ubuntu
+======================================
+
+This package installs the PAM module and registers a pam-auth-update profile at
+"Default: no". Installing it changes nothing: no PAM stack names
+pam_faciolock.so until you enable the profile.
+
+Do not hand-edit /etc/pam.d/*
+-----------------------------
+
+The profile is the supported route, and it is reversible by the same tool that
+applied it:
+
+  sudo pam-auth-update           # tick "Face authentication (Faciolock)"
+  sudo pam-auth-update --remove faciolock
+
+One profile covers sudo, su, login, sddm, the KDE lock screen and polkit,
+because all six include common-auth.
+
+Enable it on sudo first
+-----------------------
+
+The profile is all-or-nothing by construction -- it edits common-auth, which
+every service includes -- so there is no way to try it on one service through
+pam-auth-update. If you want a smaller first step, add two lines to
+/etc/pam.d/sudo by hand, live with it for a day, and then enable the profile.
+A sudo that refuses is a shell you already have; a lock screen that refuses is
+not.
+
+  sudo cp /etc/pam.d/sudo /etc/pam.d/sudo.faciolock-backup
+
+Then, above the "@include common-auth" and "@include common-account" lines:
+
+  auth     [success=end default=ignore]   pam_faciolock.so
+  account  optional                       pam_faciolock.so
+
+Both lines, not just the first. The auth line alone never calls the account
+hook, which is where the lockout release lives -- so three refused faces would
+disable face unlock for the rest of the trial and it would read as "it stopped
+working" rather than "it is rate-limited, as designed".
+
+Recovery
+--------
+
+Before making any PAM change, open a second terminal and hold a root shell in
+it:
+
+  sudo -i
+
+That shell authenticated before the edit and does not care what /etc/pam.d says
+afterwards. From it, either line undoes a by-hand trial:
+
+  cp /etc/pam.d/sudo.faciolock-backup /etc/pam.d/sudo
+  sed -i '/pam_faciolock/d' /etc/pam.d/sudo
+
+and this undoes the profile:
+
+  pam-auth-update --remove faciolock
+
+If every terminal is lost as well, the recovery is a root shell from the boot
+menu: hold Shift for GRUB, choose the recovery entry, and /etc/pam.d is an
+ordinary directory on an ordinary filesystem. Nothing in this design can make a
+machine unbootable. The worst it can do is make one service refuse to
+authenticate, and every refusal path falls through to the password prompt by
+construction: "default=ignore" means daemon down, socket missing, not enrolled,
+rate-limited, refused, malformed reply and a panic caught at the FFI boundary
+all land on the next line of the stack, which is your password.
+
+ -- Somesh Rao <cokasomeshrao@outlook.com>

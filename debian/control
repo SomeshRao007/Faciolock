@@ -1,0 +1,102 @@
+Source: faciolock
+Section: admin
+Priority: optional
+Maintainer: Somesh Rao <cokasomeshrao@outlook.com>
+Build-Depends: debhelper-compat (= 13),
+               cargo,
+               rustc (>= 1.85),
+               libpam0g-dev,
+               cmake,
+               extra-cmake-modules (>= 6.0.0),
+               libkf6kcmutils-dev (>= 6.0.0),
+               libkf6coreaddons-dev (>= 6.0.0),
+               qt6-declarative-dev (>= 6.5.0)
+Standards-Version: 4.7.0
+Homepage: https://github.com/SomeshRao007/Faciolock
+Rules-Requires-Root: no
+
+Package: faciolock
+Architecture: any
+Multi-Arch: foreign
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         faciolock-models (= ${source:Version})
+Recommends: libpam-faciolock (= ${binary:Version})
+Description: IR face authentication for Linux - daemon and CLI
+ Faciolock authenticates a user from the near-infrared camera that ships on
+ laptops with Windows Hello hardware. It is designed as a platform component:
+ a socket-activated system daemon that holds the templates and the camera, and
+ a PAM module that owns no secrets and only asks a question.
+ .
+ This package contains faciolockd, the faciolockctl enrolment and diagnostic
+ CLI, the systemd units and the polkit policy. Installing it does not enable
+ face authentication for anything; see libpam-faciolock.
+ .
+ Face authentication is a convenience factor, not a password replacement. A
+ password always remains reachable. See /usr/share/doc/faciolock/README.Debian.
+
+Package: libpam-faciolock
+Architecture: any
+Multi-Arch: same
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         libpam-runtime (>= 1.0.1-6),
+         faciolock (= ${binary:Version})
+Description: IR face authentication for Linux - PAM module
+ The PAM module half of Faciolock. It contains no cryptography, no camera code
+ and no template data; it connects to the daemon's socket, asks whether the
+ named user is present, and returns. Its entire dependency tree is libc and the
+ project's own IPC crate, because it is loaded into processes that are root
+ while they run.
+ .
+ The module ships disabled. It registers a pam-auth-update profile at
+ "Default: no", so nothing authenticates by face until an administrator runs
+ pam-auth-update and enables it explicitly. Recovery instructions for a
+ misbehaving module are in /usr/share/doc/libpam-faciolock/README.Debian.
+
+Package: plasma-faciolock-kcm
+Architecture: any
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         faciolock (= ${binary:Version}),
+         libkf6kcmutils-bin,
+         systemsettings,
+         qml6-module-qtquick,
+         qml6-module-qtquick-controls,
+         qml6-module-qtquick-layouts,
+         qml6-module-org-kde-kirigami,
+         qml6-module-org-kde-kcmutils
+Description: IR face authentication for Linux - KDE Plasma settings module
+ A System Settings page for Faciolock, and the same page as a "Face Unlock"
+ entry in the application launcher. It shows whether you are enrolled and
+ whether face authentication is switched on, and it enrols, tests and removes
+ your own face.
+ .
+ It holds no privilege of its own. Every action runs faciolockctl through
+ pkexec against the polkit action the daemon package already ships, so the
+ panel can do exactly what you could do from a terminal and nothing more. It
+ will not switch face authentication on or off; that is pam-auth-update's job
+ and giving a settings page the power to rewrite the PAM stack is a wider
+ boundary than a settings page needs.
+ .
+ Two kinds of dependency here are not found by dh_shlibdeps and are listed by
+ hand. The five qml6-module-* packages are what the panel imports at runtime;
+ those imports live inside a Qt resource in the plugin, where no ELF scan can
+ see them, and without them the page loads and renders nothing. The two
+ programs are kcmshell6 for the launcher entry and systemsettings for the
+ System Settings entry.
+
+Package: faciolock-models
+Architecture: all
+Multi-Arch: foreign
+Depends: ${misc:Depends}
+Description: IR face authentication for Linux - ONNX models
+ The neural network weights Faciolock runs: YuNet for face detection and
+ landmark extraction, SFace for the 128-dimension embedding. Both come from the
+ OpenCV Zoo and carry their upstream licences, which are vendored alongside
+ them.
+ .
+ They are packaged separately so that a security update to the daemon does not
+ re-ship 38 MB of weights, so that the licence accounting stays legible, and so
+ that a different model set can be substituted. The daemon verifies every file
+ against a SHA256 manifest before loading it.

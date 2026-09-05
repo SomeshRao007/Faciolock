@@ -15,10 +15,6 @@ impl Session {
         Session { capture: None, device: cfg.device.clone(), cfg }
     }
 
-    pub fn device(&self) -> Option<&PathBuf> {
-        self.device.as_ref()
-    }
-
     pub fn burst(&mut self) -> Result<CapturedBurst, CaptureError> {
         if self.capture.is_none() {
             self.capture = Some(self.start()?);

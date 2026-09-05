@@ -127,6 +127,22 @@ fn sockopt(fd: libc::c_int, name: libc::c_int) -> Result<libc::c_int, String> {
     }
 }
 
+// ponytail: capped so a hammering client cannot spin us
+const DRAIN_MAX: usize = 64;
+
+// ponytail: close, not reply — same PAM code, wiki/04
+pub fn drain(listener: &UnixListener) -> usize {
+    if listener.set_nonblocking(true).is_err() {
+        return 0;
+    }
+    let mut closed = 0;
+    while closed < DRAIN_MAX && listener.accept().is_ok() {
+        closed += 1;
+    }
+    let _ = listener.set_nonblocking(false);
+    closed
+}
+
 pub fn run(listener: &UnixListener, daemon: &Daemon, idle: Option<std::time::Duration>) {
     loop {
         if let Some(timeout) = idle {
@@ -491,6 +507,60 @@ mod tests {
         );
 
         drop(client);
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn connect_seqpacket(path: &Path) -> UnixStream {
+        let fd =
+            unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) };
+        assert!(fd >= 0, "socket");
+        let client = unsafe { UnixStream::from_raw_fd(fd) };
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = path.as_os_str().as_bytes();
+        for (dst, src) in addr.sun_path.iter_mut().zip(bytes) {
+            *dst = *src as libc::c_char;
+        }
+        let len = (std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1) as libc::socklen_t;
+        let rc = unsafe {
+            libc::connect(client.as_raw_fd(), &addr as *const _ as *const libc::sockaddr, len)
+        };
+        assert_eq!(rc, 0, "connect: {}", std::io::Error::last_os_error());
+        client
+    }
+
+    #[test]
+    fn a_daemon_that_cannot_start_empties_the_queue_that_would_restart_it() {
+        let path = std::env::temp_dir().join("faciolockd-drain-test.sock");
+        let listener = listen(&path).expect("binds");
+
+        // Two clients queued behind a daemon that is about to fail models::verify. Left
+        // there, each one is a fresh activation into the same failure.
+        let mut waiting: Vec<UnixStream> = (0..2).map(|_| connect_seqpacket(&path)).collect();
+
+        let started = Instant::now();
+        assert_eq!(drain(&listener), 2, "every queued request must be taken");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "drain must not block on an empty queue — it runs on the way out"
+        );
+
+        for client in &mut waiting {
+            let mut buf = [0u8; 8];
+            let read = client.read(&mut buf);
+            assert!(
+                matches!(read, Ok(0)) || read.is_err(),
+                "a drained client must see the connection go, not wait for a verdict"
+            );
+        }
+
+        assert_eq!(drain(&listener), 0, "nothing is left to reactivate on");
+        assert!(
+            matches!(wait(&listener, std::time::Duration::from_millis(50)), Wait::Idle),
+            "and the socket reads idle, which is what stops the flap"
+        );
+
         drop(listener);
         let _ = std::fs::remove_file(&path);
     }

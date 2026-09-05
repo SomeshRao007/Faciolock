@@ -1,0 +1,22 @@
+# `cargo vendor` writes a Cargo.toml.orig into every crate it vendors -- the
+# manifest as upstream published it, before cargo's own rewriting -- and hashes
+# it in that crate's .cargo-checksum.json. They are not failed-patch leftovers,
+# and deleting them breaks the build: see wiki/11 B30, where dh_clean did
+# exactly that.
+faciolock source: source-contains-patch-failure-file [vendor/*]
+
+# The vendored tree is in the source package because Launchpad's builders have
+# no network. wiki/07 "As built" carries the reasoning and names dh-cargo as the
+# alternative that the Debian-archive path would take instead.
+faciolock source: source-is-missing [vendor/*]
+
+# Two prebuilt DLLs in libloading's own test fixtures. Nothing here builds or
+# links them -- this package is Linux-only and libloading's tests are not run --
+# but they are prebuilt binaries without source, which is a real DFSG problem
+# and NOT one an override fixes.
+#
+# This is an ITP blocker, not a PPA blocker, and it is recorded as such in
+# wiki/07's upstreaming checklist. The fix is Files-Excluded repacking, which
+# also means regenerating that crate's .cargo-checksum.json, and it is not worth
+# doing before the archive path is actually being walked.
+faciolock source: source-contains-prebuilt-windows-binary [vendor/libloading-*/tests/*.dll]
