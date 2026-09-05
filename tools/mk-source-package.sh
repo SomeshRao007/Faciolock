@@ -25,6 +25,13 @@ tree="$out/$name"
 command -v dpkg-buildpackage >/dev/null || {
 	echo "needs: sudo apt install debhelper devscripts lintian" >&2; exit 2; }
 
+# Before anything is assembled, because this is the one class of defect a build cannot
+# find: the KCM's QML imports are inside a Qt resource, dh_shlibdeps reads ELF, and a
+# missing declaration ships a package that installs fine and renders a blank page on any
+# machine that is not this one. wiki/11 B33.
+"$root/tools/check-qml-deps.sh"
+echo
+
 echo "assembling $tree"
 # Keep the vendored tree across rebuilds. It is byte-identical for a given
 # Cargo.lock and re-fetching 156 crates to iterate on debian/rules is minutes
