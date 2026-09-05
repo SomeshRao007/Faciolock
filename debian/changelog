@@ -1,0 +1,32 @@
+faciolock (0.1.0~ppa2) resolute; urgency=medium
+
+  * Phase 8. A settings page, so enrolment stops requiring a terminal.
+  * New binary package plasma-faciolock-kcm: a KDE System Settings module and
+    a matching "Face Unlock" launcher entry. It holds no privilege of its own
+    and runs faciolockctl through the existing polkit action. It will not turn
+    face authentication on or off; that stays with pam-auth-update.
+  * faciolockctl gained "status", which needs no root and touches no camera.
+  * Fix: a closed stdin captured all three enrolment poses back to back,
+    without waiting for the person to move, and saved them as a complete
+    enrolment. It never failed, so it was never noticed (wiki B32).
+  * The panel's QML modules are declared by hand. They are compiled into the
+    plugin as a Qt resource, where dh_shlibdeps cannot find them, and without
+    them the page loads blank (wiki B33).
+  * GNOME and GDM remain untested rather than claimed; see
+    /usr/share/doc/faciolock/07-desktop-and-packaging.md.
+
+ -- Somesh Rao <cokasomeshrao@outlook.com>  Fri, 04 Sep 2026 00:00:00 +0530
+
+faciolock (0.1.0~ppa1) resolute; urgency=medium
+
+  * Initial release. Phase 7 of the roadmap; the first packaged build.
+  * Three binary packages: faciolock (daemon, CLI, units), libpam-faciolock
+    (the module and its pam-auth-update profile), faciolock-models (weights).
+  * Face authentication ships disabled. The profile registers at
+    "Default: no", so pam-auth-update leaves every stack untouched until an
+    administrator enables it.
+  * Known limitations at this version, both measured rather than suspected:
+    face authentication refuses in bright daylight (wiki B18), and a printed
+    face is not reliably rejected by the liveness checks (wiki B24).
+
+ -- Somesh Rao <cokasomeshrao@outlook.com>  Mon, 31 Aug 2026 19:57:01 +0530

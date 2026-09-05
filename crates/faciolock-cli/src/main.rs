@@ -3,7 +3,7 @@ mod passwd;
 mod probe;
 mod store_dir;
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -20,13 +20,14 @@ faciolockctl — manage Faciolock enrolments
   list                 who is enrolled
   remove USER [--yes]  delete an enrolment
   test [USER]          one authentication, exactly as PAM would ask for it
+  status [USER]        whether USER is enrolled; no root, no camera
   bench [-n N] [USER]  N authentications; p50/p95/p99
   diagnose [--write]   what this machine has, and the config for it
 
   --config PATH        the daemon's config (default /etc/faciolock/faciolockd.toml)
 
 USER defaults to $SUDO_USER, so `sudo faciolockctl enroll` does the obvious thing.
-Everything but `diagnose` needs root: the socket is 0600 and the store is 0700.";
+`status` and `diagnose` run as you; the rest need root, because the store is 0700.";
 
 #[derive(serde::Deserialize)]
 #[serde(default)]
@@ -97,6 +98,7 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "diagnose" => diagnose(&config, rest.contains(&"--write")),
+        "status" => status(&settings, me(rest)?),
         "enroll" | "enrol" => needs_root(command).and_then(|()| enroll(&settings, subject(rest)?)),
         "list" => needs_root(command).and_then(|()| list(&settings)),
         "remove" => needs_root(command)
@@ -117,11 +119,21 @@ fn subject(rest: &[&str]) -> Result<String, String> {
     }
 }
 
+fn me(rest: &[&str]) -> Result<String, String> {
+    subject(rest).or_else(|_| {
+        passwd::name_of(unsafe { libc::geteuid() })
+            .ok_or_else(|| "no username given, and this uid has no account".to_string())
+    })
+}
+
 fn needs_root(command: &str) -> Result<(), String> {
     match unsafe { libc::geteuid() } {
         0 => Ok(()),
+        // Not the socket any more -- P6-d opened that to faciolock-auth. What is left is the
+        // store at 0700, and may_ask refusing Enroll and Clear to anyone but root.
         _ => Err(format!(
-            "`{command}` needs root — the socket is 0600 and the store is 0700.\n\
+            "`{command}` needs root — the store is 0700, and the daemon takes enrolment\n\
+             and lockout changes from root only.\n\
              Try:  sudo faciolockctl {command} …\n\
              or:   pkexec faciolockctl {command} …"
         )),
@@ -130,6 +142,19 @@ fn needs_root(command: &str) -> Result<(), String> {
 
 fn ask(settings: &Settings, op: Op, user: &str) -> Result<Answer, String> {
     client::ask(&settings.socket, op, user, DEADLINE)
+}
+
+// One line, first word first, so a GUI splits instead of parsing prose. Everything else --
+// no daemon, not in the group -- is the usual stderr and exit 1.
+fn status(settings: &Settings, user: String) -> Result<(), String> {
+    match ask(settings, Op::Status, &user)?.verdict {
+        // serve::status maps "has a template" onto Deny. Op::Status opens no camera, so the
+        // one answer it must never be able to give is Allow.
+        Verdict::Deny => println!("enrolled {user}"),
+        Verdict::NoEnrolment => println!("not-enrolled {user}"),
+        other => return Err(format!("the daemon answered {other:?} to a status question")),
+    }
+    Ok(())
 }
 
 fn enroll(settings: &Settings, user: String) -> Result<(), String> {
@@ -144,7 +169,11 @@ fn enroll(settings: &Settings, user: String) -> Result<(), String> {
     let mut denials = 0;
     let mut unjudged = 0;
     while pose < ENROL_POSES {
-        prompt(POSES[pose]);
+        if !prompt(pose, POSES[pose]) {
+            return Err(format!(
+                "stdin closed after {pose} of {ENROL_POSES} poses — enrolment abandoned"
+            ));
+        }
         let answer = ask(settings, Op::Enroll, &user)?;
         match answer.verdict {
             Verdict::Ack => {
@@ -196,11 +225,24 @@ const POSES: [&str; ENROL_POSES] = [
     "If you wear glasses, take them off. Otherwise just look straight again.",
 ];
 
-fn prompt(instruction: &str) {
+// The prompt carries no newline, so a reader that waits for one waits forever. Off a
+// terminal, emit a line first: that is the KCM's cue to show a Capture button, and clicking
+// it writes the newline read_line is blocking on. The terminal path is unchanged.
+fn pose_marker(pose: usize, instruction: &str) -> String {
+    format!("[pose {}/{ENROL_POSES}] {instruction}", pose + 1)
+}
+
+// False means stdin closed. read_line answers Ok(0) at EOF, and discarding that answer walks
+// the whole enrolment in one pass -- three camera bursts of whatever the pose was, nobody
+// having moved between them, saved as three poses. `enroll < /dev/null` did exactly that.
+fn prompt(pose: usize, instruction: &str) -> bool {
+    if !std::io::stdout().is_terminal() {
+        println!("{}", pose_marker(pose, instruction));
+    }
     print!("{instruction}  [Enter] ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
-    let _ = std::io::stdin().read_line(&mut line);
+    matches!(std::io::stdin().read_line(&mut line), Ok(n) if n > 0)
 }
 
 fn enrol_advice(verdict: Verdict) -> &'static str {
@@ -528,6 +570,26 @@ mod tests {
 
         unsafe { std::env::remove_var("SUDO_USER") };
         assert!(subject(&[]).is_err(), "no name and no SUDO_USER must not silently pick one");
+
+        // `me` is tested here rather than in its own test because both halves mutate
+        // $SUDO_USER, and cargo runs tests in parallel threads that share the environment.
+        // Two owners of one global is a race, and it passed three times before failing
+        // inside a package build.
+        //
+        // pkexec does not set SUDO_USER, so `status` -- the one command a session runs
+        // unprivileged -- falls back to the caller instead of erroring the way subject does.
+        let caller = passwd::name_of(unsafe { libc::geteuid() }).expect("this uid has an account");
+        assert_eq!(me(&[]).expect("falls back to the caller"), caller);
+        assert_eq!(me(&["someone"]).expect("explicit still wins"), "someone");
+    }
+
+    // The KCM keys on this line to know a pose is waiting. Reword it and the panel stops
+    // showing prompts -- silently, because the process is alive and blocked on stdin.
+    #[test]
+    fn the_pose_marker_is_one_indexed_and_carries_the_instruction() {
+        assert_eq!(pose_marker(0, "Look up."), "[pose 1/3] Look up.");
+        assert_eq!(pose_marker(ENROL_POSES - 1, "Last."), "[pose 3/3] Last.");
+        assert!(pose_marker(0, POSES[0]).ends_with(POSES[0]));
     }
 
     #[test]

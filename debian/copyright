@@ -1,0 +1,94 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: faciolock
+Upstream-Contact: Somesh Rao <cokasomeshrao@outlook.com>
+Source: https://github.com/SomeshRao007/Faciolock
+
+Files: *
+Copyright: 2026 Somesh Rao <cokasomeshrao@outlook.com>
+License: GPL-3.0-or-later
+
+Files: models/face_detection_yunet_2026may.onnx
+Copyright: 2023-2026 Shiqi Yu and contributors
+           2023-2026 OpenCV Zoo contributors
+License: Expat
+Comment: YuNet face detector, distributed by the OpenCV Zoo under an explicit
+ per-model licence beside the weights. Detection and five landmarks; ~230 KB.
+
+Files: models/face_recognition_sface_2021dec.onnx
+Copyright: 2021 Yaoyao Zhong and contributors
+           2021-2026 OpenCV Zoo contributors
+License: Apache-2.0
+Comment: SFace, 128-dimension embedding, ~37 MB. The OpenCV Zoo ships a
+ per-model Apache-2.0 LICENSE beside the ONNX, which is a grant on the artefact
+ rather than an inference from a repository root.
+ .
+ One residual question is recorded here rather than hidden: the upstream
+ zhongyy/SFace repository declares no licence, and neither the zoo model card
+ nor the paper states the training dataset in terms that settle whether the
+ redistributor had the right to grant Apache-2.0 over the weights. Face
+ recognition models are commonly trained on CASIA-WebFace or MS-Celeb-1M, both
+ research-only. This must be resolved before any Debian ITP. If it does not
+ clear, the fallback is dlib's dlib_face_recognition_resnet_model_v1, which is
+ CC0. See models/README.md and wiki/11-bug-log.md B10.
+
+Files: vendor/*
+Copyright: the respective crate authors
+License: Expat or Apache-2.0 or other-permissive
+Comment: Launchpad's build machines have no network, so the Rust dependency
+ tree is vendored into the source package. All 156 crates are permissively
+ licensed and every one of them is compatible with GPL-3.0-or-later:
+ .
+   MIT and/or Apache-2.0 (dual)   152 crates
+   BSD-3-Clause                   subtle, bindgen
+   Zlib                           foldhash
+   ISC                            libloading
+   MPL-2.0                        dyn-eq
+ .
+ Each crate carries its own licence text in its vendored directory. This
+ blanket stanza is adequate for a PPA and is NOT adequate for the Debian
+ archive, which wants either per-crate librust-*-dev source packages or an
+ explicit vendoring exception with a per-file audit. See wiki/07,
+ "Packaging plan".
+
+License: GPL-3.0-or-later
+ This program is free software: you can redistribute it and/or modify it under
+ the terms of the GNU General Public License as published by the Free Software
+ Foundation, either version 3 of the License, or (at your option) any later
+ version.
+ .
+ This program is distributed in the hope that it will be useful, but WITHOUT
+ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ details.
+ .
+ On Debian systems, the complete text of the GNU General Public License
+ version 3 can be found in "/usr/share/common-licenses/GPL-3".
+
+License: Expat
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in all
+ copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ SOFTWARE.
+
+License: Apache-2.0
+ On Debian systems, the complete text of the Apache License version 2.0 can be
+ found in "/usr/share/common-licenses/Apache-2.0".
+
+License: other-permissive
+ A small number of vendored crates are neither Expat nor Apache-2.0:
+ BSD-3-Clause (subtle, bindgen), Zlib (foldhash), ISC (libloading) and MPL-2.0
+ (dyn-eq). Each carries its own licence text under its own directory in
+ vendor/, and every one of them is compatible with GPL-3.0-or-later.
