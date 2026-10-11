@@ -261,9 +261,9 @@ mod tests {
 
     #[test]
     fn one_contaminated_pair_sinks_the_whole_burst() {
-        let on = domed(W, H, 60, 10);
+        let on = flat(W, H, 60);
         let dark = blank(W, H, 0);
-        let flooded = blank(W, H, 5);
+        let flooded = blank(W, H, 57);
 
         let clean = strobe(&on, &dark, 4);
         let dirty = strobe_one_contaminated(&on, &dark, &flooded, 4, 2);

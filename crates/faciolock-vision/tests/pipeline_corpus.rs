@@ -5,7 +5,7 @@ use std::time::Instant;
 use faciolock_vision::config::MatchConfig;
 use faciolock_vision::embed::{self, Embedder, Template};
 use faciolock_vision::pipeline::{enroll_template, Verdict};
-use faciolock_vision::{Burst, BurstError, Config, Pipeline};
+use faciolock_vision::{Burst, Config, Pipeline};
 
 const ENROL_ON: &str = "live_lit_frontal";
 
@@ -68,16 +68,13 @@ fn enrol_on_one_capture_and_verify_against_the_rest() {
 
     for cap in &captures {
         let start = Instant::now();
-        let outcome = match Burst::from_planar(&cap.bytes, cap.width, cap.height, pipe.config()) {
+        let outcome = match Burst::from_planar(cap.verification_bytes(), cap.width, cap.height, pipe.config()) {
             Ok(b) => pipe.verify(&b, &template),
             Err(e) => {
                 eprintln!("{:<26} {:>10} — burst rejected: {e:?}", cap.label, "-");
-                assert!(
-                    !cap.label.starts_with("live_")
-                        || matches!(e, BurstError::AmbientTooBright { .. }),
-                    "{}: a live capture must form a burst unless gated for ambient, got {e:?}",
-                    cap.label
-                );
+                if cap.has_live_face() {
+                    panic!("{}: a live capture must form a burst, got {e:?}", cap.label);
+                }
                 continue;
             }
         };
@@ -104,16 +101,8 @@ fn enrol_on_one_capture_and_verify_against_the_rest() {
             }
         }
 
-        if cap.label.starts_with("attack_")
-            || cap.label.starts_with("null_")
-            || cap.label.starts_with("spoof_")
-        {
-            assert!(
-                !outcome.verdict.is_allow(),
-                "{}: allowed a non-face capture — {:?}",
-                cap.label,
-                outcome.verdict
-            );
+        if outcome.verdict.is_allow() != cap.has_live_face() {
+            panic!("{}: unexpected verification result — {:?}", cap.label, outcome.verdict);
         }
     }
 

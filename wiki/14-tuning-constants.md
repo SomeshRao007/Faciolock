@@ -9,8 +9,9 @@ changing one of these numbers still starts by reading what it was chosen against
 The **liveness thresholds** are deliberately not repeated here — they are a live argument,
 not settled trivia, and they belong with the measurements that constrain them:
 [12](12-falloff-calibration.md) and [13](13-daylight.md). The current defaults are
-`dark_ratio_max` 1e-3 enforced, `falloff_cv_min` 0.05 enforced, `response_min` 5.0
-advisory, `motion_max` 1.0 advisory.
+`dark_ratio_max` 0.9 enforced (at least 10% emitter modulation), `falloff_cv_min` 0.05
+enforced, `response_min` 5.0 enforced, `motion_max` 1.0 advisory. The ambient ceiling is
+229.5 on the 0–255 intensity scale; detector confidence must reach 0.8.
 
 ## Camera
 

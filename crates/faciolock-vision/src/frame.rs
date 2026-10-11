@@ -381,10 +381,8 @@ mod tests {
         let px = constant_capture(60);
         let frames: Vec<Frame<'_>> = (0..20).map(|_| Frame::new(&px, W, H).unwrap()).collect();
         match Burst::from_frames(&frames, &cfg()) {
-            Err(BurstError::AmbientTooBright { floor }) => {
-                assert!((floor - 60.0).abs() < 0.5, "floor {floor} should be the frame mean");
-            }
-            other => panic!("expected the ambient gate, got {:?}", other.map(|_| "a burst")),
+            Err(BurstError::TierMismatch { observed: Observed::Constant, .. }) => {}
+            other => panic!("expected constant illumination rejection, got {:?}", other.map(|_| "a burst")),
         }
     }
 
