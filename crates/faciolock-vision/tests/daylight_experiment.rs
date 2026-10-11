@@ -361,7 +361,7 @@ fn daylight_experiment() {
         "\n\nTABLE 2 — liveness under RELAXED (captures that form a burst)\n\
          worst = worst value over pairs; fail = failing_pairs/pairs.\n\
          'if-enforced' lists the checks with failing_pairs > 0, i.e. those that WOULD reject\n\
-         this capture were they enforced (today only DarkFrame+Falloff are enforced in BASE).\n"
+         this capture were they enforced (DarkFrame+Response+Falloff are enforced in BASE).\n"
     );
     eprintln!(
         "{:<34} {:>4} {:>5} {:>10} {:>6} {:>9} {:>6} {:>8} {:>6} {:>8} {:>6}  {}",
@@ -550,7 +550,8 @@ fn daylight_experiment() {
          B = max over pairs of |off_mean - median(off_means)| / median(|frame-to-frame step|)\n\
          off_means come from the burst's pairs; the step median is recomputed from the usable\n\
          raw frame means exactly as frame::classify does. 'old ratio' is the worst per-pair\n\
-         off_mean/on_mean, the statistic dark_ratio_max enforces today (threshold 1e-3).\n"
+         off_mean/on_mean, the statistic dark_ratio_max enforces in BASE (threshold {}).\n",
+        b.liveness.dark_ratio_max.value
     );
     eprintln!(
         "{:<34} {:>6} {:>10} {:>12} {:>12} {:>12}",

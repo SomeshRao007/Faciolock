@@ -7,9 +7,9 @@ platform component rather than an add-on.
 > **Alpha. It unlocks a screen, and it has been run on exactly one laptop.**
 >
 > The full stack works end to end — enrolment, `sudo`, SDDM and the KDE lock screen all
-> authenticate by face on the reference machine. Two measured limitations ship with it:
-> face authentication **refuses in bright daylight**, and a **printed photograph is not
-> reliably rejected**. Both are below, neither is a surprise, and neither is fixed.
+> authenticate by face on the reference machine. Recorded daylight captures now enroll
+> and verify with production defaults; the updated release still needs a daylight test
+> on hardware. A **printed photograph is not reliably rejected**.
 > See [Status](#status) and [Hardware](wiki/15-hardware-compatibility.md).
 
 ---
@@ -31,10 +31,10 @@ What that means concretely:
   on the falloff statistic the liveness check uses, so there is currently **no enforced
   check that rejects a print**. A print costs a printer, not a workshop.
   [B24](wiki/11-bug-log.md#b24).
-- **In bright daylight, face authentication refuses.** Ambient infrared saturates the
-  ratio the liveness checks are built on, so honest captures are rejected and you type
-  your password. It fails closed rather than open, which is the right direction, and it
-  is still the largest open defect in the project. [B18](wiki/11-bug-log.md#b18).
+- **Daylight requires a usable emitter signal.** Every pair must have OFF/ON ≤ 0.9
+  and ON−OFF ≥ 5 intensity levels, with a clear alternating pattern. Weak, irregular or
+  saturated captures still refuse face authentication and fall through to a password.
+  Recorded daylight passes; hardware availability with these defaults remains unverified.
 - Every claim below distinguishes what has been **measured** from what has been
   **assumed**. Some checks that sound obvious have already been refuted by measurement
   (see [B17](wiki/11-bug-log.md)); assume nothing on this page is true because it is
@@ -96,10 +96,10 @@ be unified:
 | **Liveness** | **every** pair must pass | one contaminated frame is evidence of an attack, and evidence does not average out |
 | **Matching** | k of n must agree | one bad frame is a blink or a blur, and flukes *should* average out |
 
-Getting that wrong is not theoretical. A pulsed IR source passed a per-pair dark-frame
-check on 16.7% of pairs, which at the capture budget is a **1-in-36 authentication
-bypass**. Conjunctive aggregation rejects it with four orders of magnitude to spare —
-[B9](wiki/11-bug-log.md).
+Getting that wrong is not theoretical. Under the former darkness-only threshold, a
+pulsed IR source passed a per-pair dark-frame check on 16.7% of pairs, which at the capture
+budget was a **1-in-36 authentication bypass**. That historical rejection margin does
+not apply to the daylight defaults — [B9](wiki/11-bug-log.md).
 
 Architecture is copied in spirit from `fprintd`, which is the design Debian already ships
 and trusts: an unprivileged, socket-activated daemon owns the camera and the ML, and a
@@ -131,9 +131,10 @@ Measured on the reference machine against recorded captures, not asserted:
 | Claim | Evidence |
 |---|---|
 | Hardware self-strobes, 15 ON/OFF pairs/sec | 3 independent runs |
-| Dark-frame integrity rejects an IR floodlight | 4 orders of magnitude margin, 0 false rejects in 210 live pairs |
-| One contaminated pair sinks a burst | replayed in CI, synthetic and recorded |
-| YuNet detects faces in **near-infrared** | 5/5 live captures; 0 on an empty room, a floodlight, and a phone screen |
+| Emitter modulation and response are required over ambient light | OFF/ON ≤ 0.9 and ON−OFF ≥ 5 enforced on every pair; synthetic weak-response cases reject |
+| One pair failing enforced liveness sinks a burst | synthetic regression; no majority vote |
+| YuNet detects faces in **near-infrared** | live recordings pass, including daylight; the ceramic mug rejects before identity matching |
+| Recorded daylight enrollment and verification work with production defaults | dark and daylight templates, full captures and six-frame daemon bursts; one known low-SNR window remains unusable |
 | SFace discriminates on **near-infrared** | genuine cross-capture cosine 0.60–0.90 against a 0.363 threshold |
 | Detection and alignment match OpenCV | box IoU 0.998–0.999; aligned chip mean diff 0.000, max 1 |
 | A phone screen showing a photo is rejected | verdict `NoFace` — though see below |
@@ -154,10 +155,12 @@ nothing:
   answer was the bad one: a magazine print measured CV 0.2733 against a worst live face of
   0.2661, so the falloff check reads the print as *more* alive than a person. No liveness
   check currently rejects a print. [B24](wiki/11-bug-log.md#b24).
-- **Daylight rejects honest faces.** Every strobe statistic is a ratio and ambient infrared
-  saturates a ratio. The gate fails closed, so the cost is a password prompt rather than a
-  bypass, but face authentication is effectively unavailable in a sunlit room.
-  [B18](wiki/11-bug-log.md#b18).
+- **Daylight hardware availability with the updated defaults is unverified.** Offline
+  enrollment and verification pass. One of 960 measured live six-frame windows fails the
+  unchanged temporal-SNR classifier and remains explicitly unusable in the regression.
+- **Extra IR alongside a genuine enrolled face is not categorically rejected.** Two
+  recordings contain the enrolled person with an IR remote and now match. These are not
+  identity impersonations; the corpus cannot establish general spoof resistance.
 - **The response test does not do what it was designed to do.** It was meant to reject
   screens on the grounds that an LCD emits nothing at 850 nm. A phone measured `D = 36.2`
   against a live minimum of 48.6, not the predicted ~0, because the statistic is
@@ -173,8 +176,7 @@ nothing:
   is quoted here.
 - **One machine.** Every hardware claim comes from a single ASUS Vivobook.
 
-Three of the four liveness checks report as `advisory` rather than `enforced` in the
-verdict, so the audit log cannot overstate what was actually checked.
+Only motion reports as `advisory`; emitter modulation, response and falloff are enforced.
 
 ---
 

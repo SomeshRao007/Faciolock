@@ -6,8 +6,9 @@ use faciolock_vision::{Detector, Frame};
 const SEARCH_FRAMES: usize = 20;
 
 fn brightest_frame(cap: &common::Capture) -> usize {
-    let start = 5.min(cap.frame_count().saturating_sub(1));
-    let end = SEARCH_FRAMES.min(cap.frame_count());
+    let offset = (cap.bytes.len() - cap.verification_bytes().len()) / (cap.width * cap.height);
+    let start = (offset + 5).min(cap.frame_count().saturating_sub(1));
+    let end = (offset + SEARCH_FRAMES).min(cap.frame_count());
     (start..end)
         .max_by(|&a, &b| {
             let mean = |i: usize| {

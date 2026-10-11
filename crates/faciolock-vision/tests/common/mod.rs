@@ -49,6 +49,20 @@ pub struct Capture {
 }
 
 impl Capture {
+    pub fn has_live_face(&self) -> bool {
+        self.label.starts_with("live_")
+            // These recordings contain the enrolled person with an IR remote at the sensor.
+            || matches!(self.label.as_str(), "attack_floodlight_daylight" | "attack_floodlight_room")
+    }
+
+    pub fn verification_bytes(&self) -> &[u8] {
+        // The subject is still leaving at the start of this nominally empty recording.
+        if self.stem == "null_daylight_room_20260806T060331Z" {
+            return &self.bytes[30 * self.width * self.height..];
+        }
+        &self.bytes
+    }
+
     pub fn frame(&self, i: usize) -> &[u8] {
         let stride = self.width * self.height;
         &self.bytes[i * stride..(i + 1) * stride]
