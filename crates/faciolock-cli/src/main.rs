@@ -249,7 +249,7 @@ fn enrol_advice(verdict: Verdict) -> &'static str {
     match verdict {
         Verdict::Deny => "no usable face — sit square to the camera, about arm's length away",
         Verdict::Unavailable => {
-            "couldn't judge that one — too much infrared in the room, or the camera is busy"
+            "couldn't capture a usable image — the camera may be busy or the infrared signal unclear"
         }
         Verdict::RateLimited => "the daemon is refusing requests for this user right now",
         Verdict::NoEnrolment | Verdict::Allow | Verdict::Ack => "unexpected answer from the daemon",
@@ -259,9 +259,8 @@ fn enrol_advice(verdict: Verdict) -> &'static str {
 fn stuck_advice(verdict: Verdict) -> &'static str {
     match verdict {
         Verdict::Unavailable => {
-            "This is usually daylight: the infrared floor is above what the sensor can work \
-             against. Close the blinds or try after dark. If the room is already dark, check \
-             nothing else is using the camera."
+            "Check nothing else is using the camera, then run: sudo faciolockctl diagnose. \
+             If the infrared signal is weak, face the camera and move out of direct sunlight."
         }
         _ => "Check the camera sees you at all:  sudo faciolockctl diagnose",
     }
@@ -467,13 +466,13 @@ fn diagnose(config: &Path, write: bool) -> Result<(), String> {
     };
     println!("  frame means  {}", sample_of(&strobe.means));
     println!("  alternation  {:.2}  (1.00 is a clean ON/OFF pattern)", strobe.alternation);
-    println!("  bright/dark  {:.1}:1", strobe.ratio);
+    println!("  modulation   {:.2} brightness levels", strobe.amplitude);
+    println!("  signal/noise {:.1}:1  (10.0 or higher indicates a clear strobe)", strobe.snr);
 
     if !strobe.is_strobing() {
         println!("\n  No strobe observed, and no tier will be written.");
-        println!("  Most often this is daylight rather than hardware: ambient infrared lifts");
-        println!("  the dark frames until the pattern flattens. Re-run after dark. Writing a");
-        println!("  weaker tier because a room was bright is exactly what P1-e forbids.");
+        println!("  The infrared signal is weak or irregular. Face the camera, check the");
+        println!("  emitter is unobstructed, and move out of direct sunlight before retrying.");
         return Ok(());
     }
 
@@ -628,15 +627,18 @@ mod tests {
     }
 
     #[test]
-    fn a_bright_room_is_described_as_a_room() {
+    fn unavailable_capture_advice_is_actionable() -> Result<(), String> {
         let advice = enrol_advice(Verdict::Unavailable);
-        assert!(advice.contains("infrared"), "{advice}");
-        assert!(stuck_advice(Verdict::Unavailable).contains("daylight"));
+        if !advice.contains("camera") || !stuck_advice(Verdict::Unavailable).contains("diagnose") {
+            return Err("unavailable capture advice must explain how to check the camera".into());
+        }
 
         for v in [Verdict::Deny, Verdict::Unavailable, Verdict::RateLimited, Verdict::NoEnrolment] {
-            assert!(!enrol_advice(v).is_empty());
-            assert!(!describe(v).is_empty());
+            if enrol_advice(v).is_empty() || describe(v).is_empty() {
+                return Err("missing enrollment advice".into());
+            }
         }
+        Ok(())
     }
 
     #[test]
