@@ -12,44 +12,41 @@ const PROBE_WARMUP: usize = 5;
 pub struct Strobe {
     pub means: Vec<f64>,
     pub alternation: f64,
-    pub ratio: f64,
+    pub amplitude: f64,
+    pub snr: f64,
 }
 
 impl Strobe {
     pub fn is_strobing(&self) -> bool {
-        self.alternation >= 0.9 && self.ratio >= 2.0
+        self.alternation >= 0.9 && self.snr >= 10.0
     }
 }
 
 pub fn analyse(means: Vec<f64>) -> Strobe {
-    if means.len() < 4 {
-        return Strobe { means, alternation: 0.0, ratio: 0.0 };
+    if means.len() < 3 {
+        return Strobe { means, alternation: 0.0, amplitude: 0.0, snr: 0.0 };
     }
 
-    let mut sorted = means.clone();
-    sorted.sort_by(|a, b| a.total_cmp(b));
-    let mid = sorted.len() / 2;
-    let median = match sorted.len() % 2 {
-        0 => (sorted[mid - 1] + sorted[mid]) / 2.0,
-        _ => sorted[mid],
+    // Match vision::frame::classify without linking the inference runtime into the CLI.
+    // Differences preserve the emitter signal when daylight lifts both frame phases.
+    let steps: Vec<f64> = means.windows(2).map(|w| w[1] - w[0]).collect();
+    let amplitude = median_abs(&steps);
+    let same_phase = median_abs(&means.windows(3).map(|w| w[2] - w[0]).collect::<Vec<_>>());
+    let snr = match (amplitude > 0.0, same_phase > 0.0) {
+        (true, false) => f64::INFINITY,
+        (true, true) => amplitude / same_phase,
+        (false, _) => 0.0,
     };
+    let flips = steps.windows(2).filter(|w| w[0] * w[1] < 0.0).count();
+    let alternation = flips as f64 / (steps.len() - 1) as f64;
 
-    let above: Vec<bool> = means.iter().map(|m| *m > median).collect();
-    let flips = above.windows(2).filter(|w| w[0] != w[1]).count();
-    let alternation = flips as f64 / (above.len() - 1) as f64;
+    Strobe { means, alternation, amplitude, snr }
+}
 
-    let mean_of = |want: bool| {
-        let picked: Vec<f64> =
-            means.iter().zip(&above).filter(|(_, a)| **a == want).map(|(m, _)| *m).collect();
-        match picked.is_empty() {
-            true => 0.0,
-            false => picked.iter().sum::<f64>() / picked.len() as f64,
-        }
-    };
-    let (bright, dark) = (mean_of(true), mean_of(false));
-    let ratio = if dark > 0.0 { bright / dark } else { f64::MAX };
-
-    Strobe { means, alternation, ratio }
+fn median_abs(values: &[f64]) -> f64 {
+    let mut sorted: Vec<f64> = values.iter().map(|v| v.abs()).collect();
+    sorted.sort_by(f64::total_cmp);
+    sorted[sorted.len() / 2]
 }
 
 pub fn observe(node: &Path, geometry: Geometry) -> Result<Strobe, String> {
@@ -120,16 +117,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_reference_machines_recorded_run_reads_as_a_strobe() {
+    fn the_reference_machines_recorded_run_reads_as_a_strobe() -> Result<(), String> {
         let means = vec![
             0.00126302, 59.9136, 0.00366753, 61.9249, 0.00404514, 61.0619, 0.00392795, 60.3695,
             0.0040842, 59.8574, 0.00400608, 59.3313, 0.0040625, 58.8541, 0.00408854, 58.4122,
             0.00403212, 58.0754, 0.00400174, 57.7173, 0.00414931, 57.4615, 0.00385851, 56.9237,
         ];
         let s = analyse(means);
-        assert_eq!(s.alternation, 1.0, "27 clean pairs, no missed beats");
-        assert!(s.ratio > 10_000.0, "wiki/10 measured ~14,000:1, got {}", s.ratio);
-        assert!(s.is_strobing());
+        if !s.is_strobing() || s.alternation != 1.0 || s.amplitude < 50.0 {
+            return Err(format!("lost reference strobe: amplitude {}, SNR {}", s.amplitude, s.snr));
+        }
+        Ok(())
     }
 
     #[test]
@@ -142,13 +140,32 @@ mod tests {
     }
 
     #[test]
-    fn a_washed_out_capture_is_not_a_strobe_and_is_not_a_demotion() {
-        let means: Vec<f64> =
-            (0..24).map(|i| if i % 2 == 0 { 84.0 } else { 86.0 }).collect();
-        let s = analyse(means);
-        assert_eq!(s.alternation, 1.0, "it still alternates, faintly");
-        assert!(s.ratio < 2.0, "but the ratio is gone: {}", s.ratio);
-        assert!(!s.is_strobing(), "and that must not read as a strobe");
+    fn daylight_and_agc_drift_preserve_a_clear_strobe() -> Result<(), String> {
+        for (ambient, response, drift) in [(84.0, 2.0, 0.0), (84.0, 10.0, 0.4)] {
+            let means = (0..30)
+                .map(|i| ambient + i as f64 * drift + if i % 2 == 0 { 0.0 } else { response })
+                .collect();
+            let s = analyse(means);
+            if !s.is_strobing() || s.alternation != 1.0 {
+                return Err(format!("lost daylight strobe: amplitude {}, SNR {}", s.amplitude, s.snr));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn noise_and_irregular_pulses_are_not_a_strobe() -> Result<(), String> {
+        for means in [
+            vec![84.0, 86.0, 83.0, 89.0, 84.0, 91.0],
+            vec![84.0, 94.0, 94.0, 84.0, 84.0, 94.0],
+            vec![84.0, 85.0, 86.0, 87.0, 88.0, 89.0],
+            vec![84.0, 94.0],
+        ] {
+            if analyse(means).is_strobing() {
+                return Err("classified noise or an incomplete pattern as a strobe".into());
+            }
+        }
+        Ok(())
     }
 
     #[test]
