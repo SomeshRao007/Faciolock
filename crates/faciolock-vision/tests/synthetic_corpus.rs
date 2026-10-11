@@ -29,12 +29,39 @@ fn a_live_like_capture_is_allowed() {
 }
 
 #[test]
+fn daylight_requires_both_absolute_and_relative_emitter_response() -> Result<(), String> {
+    let c = cfg();
+    let on: Vec<u8> = domed(W, H, 60, 8).iter().map(|p| p + 100).collect();
+    let bytes = strobe(&on, &blank(W, H, 100), 3);
+    let burst = Burst::from_planar(&bytes, W, H, &c).map_err(|e| format!("daylight: {e:?}"))?;
+    let report = liveness::evaluate(&burst, &whole(), &c);
+    if report.rejection().is_some() {
+        return Err(format!("ambient light hid a usable curved response: {report:?}"));
+    }
+
+    for (on, off, expected) in [(4, 0, Check::Response), (100, 95, Check::DarkFrame)] {
+        let bytes = strobe(&blank(W, H, on), &blank(W, H, off), 3);
+        let burst = Burst::from_planar(&bytes, W, H, &c).map_err(|e| format!("weak IR: {e:?}"))?;
+        let rejected = liveness::pre_box(&burst, &c).rejection();
+        if rejected.map(|r| r.check) != Some(expected) {
+            return Err(format!("ON={on}, OFF={off}: expected {expected:?}, got {rejected:?}"));
+        }
+    }
+
+    let bytes = strobe(&blank(W, H, 255), &blank(W, H, 240), 3);
+    if !matches!(Burst::from_planar(&bytes, W, H, &c), Err(BurstError::AmbientTooBright { .. })) {
+        return Err("near-saturated ambient must not yield a usable burst".into());
+    }
+    Ok(())
+}
+
+#[test]
 fn a_single_contaminated_pair_rejects_the_burst() {
     let c = cfg();
     let bytes = strobe_one_contaminated(
-        &domed(W, H, 60, 8),
+        &flat(W, H, 60),
         &blank(W, H, 0),
-        &blank(W, H, 5),
+        &blank(W, H, 57),
         6,
         3,
     );
@@ -63,10 +90,8 @@ fn a_degenerate_flat_presentation_is_rejected() {
 fn constant_illumination_is_refused_rather_than_downgraded() {
     let c = cfg();
     match Burst::from_planar(&blank(W, H, 60).repeat(12), W, H, &c) {
-        Err(BurstError::AmbientTooBright { floor }) => {
-            assert!((floor - 60.0).abs() < 0.5, "floor {floor} should be the frame mean")
-        }
-        other => panic!("expected the ambient gate, got {:?}", other.map(|_| "a burst")),
+        Err(BurstError::TierMismatch { observed: Observed::Constant, .. }) => {}
+        other => panic!("expected constant illumination rejection, got {:?}", other.map(|_| "a burst")),
     }
 
     for level in [0u8, 1, 30, 60, 200, 255] {

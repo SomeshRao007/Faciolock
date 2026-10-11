@@ -43,8 +43,9 @@ pub struct LivenessConfig {
 impl Default for LivenessConfig {
     fn default() -> LivenessConfig {
         LivenessConfig {
-            dark_ratio_max: Threshold::enforced(1e-3),
-            response_min: Threshold::advisory(5.0),
+            // OFF contains ambient light. Require at least 10% emitter modulation in ON.
+            dark_ratio_max: Threshold::enforced(0.9),
+            response_min: Threshold::enforced(5.0),
             falloff_cv_min: Threshold::enforced(0.05),
             motion_max: Threshold::advisory(1.0),
         }
@@ -60,7 +61,7 @@ pub struct DetectConfig {
 
 impl Default for DetectConfig {
     fn default() -> DetectConfig {
-        DetectConfig { input_size: 320, score_min: 0.3, nms_iou_max: 0.3 }
+        DetectConfig { input_size: 320, score_min: 0.8, nms_iou_max: 0.3 }
     }
 }
 
@@ -94,7 +95,8 @@ impl Default for Config {
             tier: Tier::IrStrobe,
             agc_settle_frames: 5,
             min_pairs: 2,
-            ambient_floor_max: 0.04,
+            // Above this OFF mean, even ON = 255 cannot provide 10% modulation.
+            ambient_floor_max: 229.5,
             liveness: LivenessConfig::default(),
             detect: DetectConfig::default(),
             matching: MatchConfig::default(),
@@ -107,15 +109,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enforcement_matches_what_the_corpus_can_support() {
+    fn emitter_response_and_flatness_remain_enforced() -> Result<(), String> {
         let l = LivenessConfig::default();
-        assert!(l.dark_ratio_max.rejects(), "measured against a real attack, wiki/11 B9");
-        assert!(
-            l.falloff_cv_min.rejects(),
-            "a floor below every measured live value costs nothing and rejects a flat presentation"
-        );
-        assert!(!l.response_min.rejects(), "no screen sample exists yet");
-        assert!(!l.motion_max.rejects(), "statistic is untested; B9 killed the previous one");
+        if !l.dark_ratio_max.rejects() || !l.response_min.rejects() || !l.falloff_cv_min.rejects() {
+            return Err("emitter modulation, response and falloff must reject failures".into());
+        }
+        if l.motion_max.rejects() {
+            return Err("motion has not been calibrated for enforcement".into());
+        }
+        Ok(())
     }
 
     #[test]
@@ -135,16 +137,14 @@ mod tests {
     }
 
     #[test]
-    fn the_gate_closes_before_the_dark_frame_check_breaks() {
-        const WEAKEST_LIVE_AMPLITUDE: f64 = 48.0;
+    fn the_ambient_ceiling_preserves_emitter_headroom() -> Result<(), String> {
         let c = Config::default();
-        let breaks_at = WEAKEST_LIVE_AMPLITUDE * c.liveness.dark_ratio_max.value
-            / (1.0 - c.liveness.dark_ratio_max.value);
-        assert!(
-            c.ambient_floor_max <= breaks_at,
-            "gate at {} sits above {breaks_at}, where dark_ratio_max starts false-rejecting",
-            c.ambient_floor_max
-        );
+        if c.ambient_floor_max > 255.0 * c.liveness.dark_ratio_max.value
+            || c.ambient_floor_max <= 62.31
+        {
+            return Err("ambient ceiling must admit recorded daylight and reserve IR headroom".into());
+        }
+        Ok(())
     }
 
     #[test]
