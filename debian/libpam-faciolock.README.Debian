@@ -2,8 +2,9 @@ libpam-faciolock for Debian and Ubuntu
 ======================================
 
 This package installs the PAM module and registers a pam-auth-update profile at
-"Default: no". Installing it changes nothing: no PAM stack names
-pam_faciolock.so until you enable the profile.
+"Default: yes". A fresh install enables face authentication; until a face is
+enrolled, the PAM stack falls through to the password prompt. An administrator's
+explicitly disabled profile stays disabled on upgrades.
 
 Do not hand-edit /etc/pam.d/*
 -----------------------------
@@ -11,33 +12,16 @@ Do not hand-edit /etc/pam.d/*
 The profile is the supported route, and it is reversible by the same tool that
 applied it:
 
-  sudo pam-auth-update           # tick "Face authentication (Faciolock)"
-  sudo pam-auth-update --remove faciolock
+  sudo faciolockctl disable
+  sudo faciolockctl enable
 
 One profile covers sudo, su, login, sddm, the KDE lock screen and polkit,
 because all six include common-auth.
 
-Enable it on sudo first
------------------------
+For the KDE lock screen, add your account to faciolock-auth and log out and
+back in once so the session receives the new group membership:
 
-The profile is all-or-nothing by construction -- it edits common-auth, which
-every service includes -- so there is no way to try it on one service through
-pam-auth-update. If you want a smaller first step, add two lines to
-/etc/pam.d/sudo by hand, live with it for a day, and then enable the profile.
-A sudo that refuses is a shell you already have; a lock screen that refuses is
-not.
-
-  sudo cp /etc/pam.d/sudo /etc/pam.d/sudo.faciolock-backup
-
-Then, above the "@include common-auth" and "@include common-account" lines:
-
-  auth     [success=end default=ignore]   pam_faciolock.so
-  account  optional                       pam_faciolock.so
-
-Both lines, not just the first. The auth line alone never calls the account
-hook, which is where the lockout release lives -- so three refused faces would
-disable face unlock for the rest of the trial and it would read as "it stopped
-working" rather than "it is rate-limited, as designed".
+  sudo gpasswd -a $USER faciolock-auth
 
 Recovery
 --------
@@ -48,14 +32,9 @@ it:
   sudo -i
 
 That shell authenticated before the edit and does not care what /etc/pam.d says
-afterwards. From it, either line undoes a by-hand trial:
+afterwards. From it, disable the profile:
 
-  cp /etc/pam.d/sudo.faciolock-backup /etc/pam.d/sudo
-  sed -i '/pam_faciolock/d' /etc/pam.d/sudo
-
-and this undoes the profile:
-
-  pam-auth-update --remove faciolock
+  faciolockctl disable
 
 If every terminal is lost as well, the recovery is a root shell from the boot
 menu: hold Shift for GRUB, choose the recovery entry, and /etc/pam.d is an
