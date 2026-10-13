@@ -24,13 +24,6 @@ SimpleKCM {
             text: kcm.trouble
         }
 
-        Kirigami.InlineMessage {
-            Layout.fillWidth: true
-            type: Kirigami.MessageType.Information
-            visible: kcm.trouble === "" && !kcm.pamEnabled
-            text: "Enrolled faces are not being used yet. Turn face unlock on with:  sudo pam-auth-update"
-        }
-
         Kirigami.FormLayout {
             Layout.fillWidth: true
 
@@ -41,9 +34,15 @@ SimpleKCM {
                     : "Unknown"
             }
 
-            Controls.Label {
+            Controls.Switch {
                 Kirigami.FormData.label: "Face unlock:"
-                text: kcm.pamEnabled ? "On" : "Off"
+                text: checked ? "On" : "Off"
+                checked: kcm.pamEnabled
+                enabled: !kcm.busy
+                onClicked: {
+                    kcm.run(kcm.pamEnabled ? "disable" : "enable")
+                    checked = Qt.binding(function() { return kcm.pamEnabled })
+                }
             }
         }
 
