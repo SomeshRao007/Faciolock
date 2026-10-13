@@ -1,0 +1,4 @@
+data/greeters/sddm/faciolock/* usr/share/sddm/themes/faciolock/
+data/greeters/FaceScanIndicator.qml usr/share/sddm/themes/faciolock/
+data/greeters/FaceScanIndicator.qml usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/
+data/greeters/lockscreen/LockScreen.qml usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/

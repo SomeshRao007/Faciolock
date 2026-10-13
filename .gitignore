@@ -105,4 +105,7 @@ debian/*.debhelper.log
 debian/faciolock/
 debian/faciolock-models/
 debian/libpam-faciolock/
+debian/plasma-faciolock-kcm/
+debian/plasma-faciolock-greeters/
+debian/kcm-build/
 debian/tmp/
