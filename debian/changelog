@@ -1,3 +1,27 @@
+faciolock (0.1.0~ppa3) resolute; urgency=medium
+
+  * Daylight. The emitter check asked for a dark OFF frame, which ambient
+    infrared never gives it; it now asks for modulation instead. Every frame
+    pair must show OFF/ON <= 0.9 and ON-OFF >= 5 levels, and both are enforced
+    rather than advisory. Recorded daylight captures enrol and verify with
+    these defaults. A daylight run on hardware is still owed.
+  * What that costs, stated here rather than left in the wiki: the margin the
+    darkness threshold held against a pulsed infrared source (wiki B9) does
+    not carry over, and extra infrared beside a genuinely enrolled face is not
+    categorically rejected.
+  * The detector's score floor rose from 0.3 to 0.8.
+  * faciolockctl diagnose reports modulation and signal/noise in place of a
+    bright/dark ratio, and its advice no longer blames the room.
+  * README.Debian and faciolockctl(1) said daylight refuses. They no longer do.
+  * A printed face is still not reliably rejected (wiki B24).
+  * Enable the face PAM profile by default and add a system-wide On/Off toggle
+    through faciolockctl and the Plasma settings page.
+  * Start face scanning automatically at SDDM login and Plasma screen unlock;
+    show a scanning indicator while checking and keep password fallback.
+  * Limit each camera attempt to six seconds and release it after capture.
+
+ -- Somesh Rao <cokasomeshrao@outlook.com>  Sun, 11 Oct 2026 12:43:21 +0530
+
 faciolock (0.1.0~ppa2) resolute; urgency=medium
 
   * Phase 8. A settings page, so enrolment stops requiring a terminal.

@@ -50,9 +50,14 @@ not enrolled, rate-limited, refused -- falls through to it.
 
 Two limitations at this version are measured rather than suspected:
 
-  * In bright daylight the ambient-infrared floor rejects honest captures, so
-    face authentication refuses and you type your password. Enabling the PAM
-    profile in a sunlit room buys nothing and costs a second or two per sudo.
+  * Daylight needs a usable emitter signal. Every frame pair must show the
+    emitter over the ambient light (OFF/ON <= 0.9 and ON-OFF >= 5 levels); a
+    weak, irregular or saturated capture refuses and you type your password.
+    Recorded daylight captures pass with these defaults. A daylight run on
+    hardware has not been observed at this version. The margin the earlier
+    darkness threshold held against a pulsed infrared source went with the
+    change, and extra infrared beside a genuinely enrolled face is not
+    categorically rejected.
 
   * A printed photograph is not reliably rejected by the liveness checks. The
     published bar for this project is the same one Windows Hello sits at: a

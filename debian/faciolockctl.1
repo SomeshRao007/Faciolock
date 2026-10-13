@@ -92,9 +92,11 @@ The daemon's socket, mode 0660, group
 .SH LIMITATIONS
 Two are measured rather than suspected, and both ship with this version.
 .PP
-In bright daylight, ambient infrared saturates the statistics the liveness
-checks are built on, so honest captures are rejected and authentication falls
-through to a password. It fails closed rather than open.
+In daylight the emitter must still be visible over ambient infrared: every
+frame pair needs OFF/ON at most 0.9 and ON\-OFF at least 5 levels. A weak,
+irregular or saturated capture is refused and authentication falls through to
+a password. Recorded daylight captures pass; a daylight run on hardware has not
+been observed at this version.
 .PP
 A flat printed photograph is not reliably rejected. There is currently no
 enforced liveness check that separates a print from a live face.
