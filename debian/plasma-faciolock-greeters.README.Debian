@@ -1,0 +1,25 @@
+Faciolock greeters for Plasma and SDDM
+======================================
+
+The package selects the Faciolock Breeze SDDM theme and diverts only Plasma's
+LockScreen.qml entry file. Plasma's original entry is retained as
+FaciolockStockLockScreen.qml, so the standard lock-screen layout, password
+field, session controls and power controls remain in use. Removing the package
+restores the original entry and the previous SDDM theme selection.
+
+Automatic scanning requires an enrolled face and an enabled PAM profile. The
+Plasma lock-screen process also needs access to the faciolock-auth socket group;
+log out and back in after group membership changes. The password prompt remains
+available if the face check cannot complete.
+
+Use the System Settings Face Unlock switch or `sudo faciolockctl enable` and
+`sudo faciolockctl disable` to change the global setting. These commands keep
+the greeter setting at /etc/xdg/faciolock-greeter.conf in sync with PAM. Direct
+changes through pam-auth-update require a matching enable/disable command to
+refresh the greeter setting.
+
+SDDM reports when a login attempt begins and ends, rather than the exact moment
+the camera stops. Its scanning indicator ends on a login result or after seven
+seconds. The daemon limits camera capture separately to six seconds.
+
+ -- Faciolock contributors
