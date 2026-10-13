@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use faciolock_camera::{Capture, Geometry, discover, open, survey};
 use faciolock_camera::enumerate::Node;
@@ -69,7 +69,8 @@ fn a_burst_off_the_sensor_is_contiguous_and_still_strobes() {
     let path = found.by_path.unwrap_or(found.node);
     let dev = open(&path, REFERENCE).expect("GREY at 640x360");
 
-    let mut cap = Capture::start(dev, REFERENCE, 5).expect("stream starts");
+    let mut cap = Capture::start(dev, REFERENCE, 5, Instant::now() + Duration::from_secs(3))
+        .expect("stream starts");
     let burst = cap.burst(30, Duration::from_secs(3)).expect("30 frames");
 
     assert_eq!(burst.width, 640);
@@ -135,7 +136,8 @@ fn a_burst_contains_no_frame_older_than_the_request() {
     let found = discover().expect("an IR camera");
     let path = found.by_path.unwrap_or(found.node);
     let dev = open(&path, REFERENCE).expect("GREY at 640x360");
-    let mut cap = Capture::start(dev, REFERENCE, 5).expect("stream starts");
+    let mut cap = Capture::start(dev, REFERENCE, 5, Instant::now() + Duration::from_secs(3))
+        .expect("stream starts");
 
     std::thread::sleep(Duration::from_millis(500));
 
@@ -160,7 +162,8 @@ fn burst_cost_from_a_warm_session() {
     let found = discover().expect("an IR camera");
     let path = found.by_path.unwrap_or(found.node);
     let dev = open(&path, REFERENCE).expect("GREY at 640x360");
-    let mut cap = Capture::start(dev, REFERENCE, 5).expect("stream starts");
+    let mut cap = Capture::start(dev, REFERENCE, 5, Instant::now() + Duration::from_secs(3))
+        .expect("stream starts");
 
     for _ in 0..10 {
         let _ = cap.burst(FRAMES, Duration::from_secs(2));
