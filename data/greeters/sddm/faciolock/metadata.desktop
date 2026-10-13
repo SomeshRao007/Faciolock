@@ -1,0 +1,13 @@
+[SddmGreeterTheme]
+Name=Faciolock Breeze
+Description=Breeze login with automatic face scanning
+Author=KDE Visual Design Group; Faciolock contributors
+License=LGPL-2.0-or-later
+Type=sddm-theme
+Version=0.1
+Website=https://github.com/SomeshRao007/Faciolock
+MainScript=Main.qml
+ConfigFile=theme.conf
+Theme-Id=faciolock
+Theme-API=2.0
+QtVersion=6

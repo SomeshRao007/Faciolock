@@ -7,6 +7,11 @@ Files: *
 Copyright: 2026 Somesh Rao <cokasomeshrao@outlook.com>
 License: GPL-3.0-or-later
 
+Files: data/greeters/sddm/faciolock/Main.qml
+Copyright: 2016 David Edmundson <davidedmundson@kde.org>
+           KDE Plasma contributors
+License: LGPL-2.0-or-later
+
 Files: models/face_detection_yunet_2026may.onnx
 Copyright: 2023-2026 Shiqi Yu and contributors
            2023-2026 OpenCV Zoo contributors
@@ -63,6 +68,10 @@ License: GPL-3.0-or-later
  .
  On Debian systems, the complete text of the GNU General Public License
  version 3 can be found in "/usr/share/common-licenses/GPL-3".
+
+License: LGPL-2.0-or-later
+ On Debian systems, the complete text of the GNU Lesser General Public License
+ version 2 can be found in "/usr/share/common-licenses/LGPL-2".
 
 License: Expat
  Permission is hereby granted, free of charge, to any person obtaining a copy

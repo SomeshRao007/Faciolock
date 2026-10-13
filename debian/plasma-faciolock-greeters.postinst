@@ -1,0 +1,22 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = configure ]; then
+    if awk '{ sub(/#.*/, ""); for (i = 1; i <= NF; i++) if ($i == "pam_faciolock.so") found=1 } END { exit !found }' /etc/pam.d/common-auth; then
+        enabled=true
+    else
+        enabled=false
+    fi
+
+    install -d -m 0755 /etc/xdg /etc/sddm.conf.d
+    config=$(mktemp /etc/xdg/.faciolock-greeter.conf.XXXXXX)
+    chmod 0644 "$config"
+    printf '[FaceUnlock]\nenabled=%s\n' "$enabled" > "$config"
+    mv -f "$config" /etc/xdg/faciolock-greeter.conf
+
+    if [ ! -e /etc/sddm.conf.d/zz-faciolock.conf ]; then
+        printf '[Theme]\nCurrent=faciolock\n' > /etc/sddm.conf.d/zz-faciolock.conf
+    fi
+fi
+
+#DEBHELPER#

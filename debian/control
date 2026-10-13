@@ -29,8 +29,8 @@ Description: IR face authentication for Linux - daemon and CLI
  a PAM module that owns no secrets and only asks a question.
  .
  This package contains faciolockd, the faciolockctl enrolment and diagnostic
- CLI, the systemd units and the polkit policy. Installing it does not enable
- face authentication for anything; see libpam-faciolock.
+ CLI, the systemd units and the polkit policy. The recommended
+ libpam-faciolock package enables face authentication by default.
  .
  Face authentication is a convenience factor, not a password replacement. A
  password always remains reachable. See /usr/share/doc/faciolock/README.Debian.
@@ -49,16 +49,16 @@ Description: IR face authentication for Linux - PAM module
  project's own IPC crate, because it is loaded into processes that are root
  while they run.
  .
- The module ships disabled. It registers a pam-auth-update profile at
- "Default: no", so nothing authenticates by face until an administrator runs
- pam-auth-update and enables it explicitly. Recovery instructions for a
- misbehaving module are in /usr/share/doc/libpam-faciolock/README.Debian.
+ The module registers a pam-auth-update profile enabled by default, with
+ password fallback. faciolockctl can turn the profile on or off. Recovery
+ instructions are in /usr/share/doc/libpam-faciolock/README.Debian.
 
 Package: plasma-faciolock-kcm
 Architecture: any
 Depends: ${shlibs:Depends},
          ${misc:Depends},
          faciolock (= ${binary:Version}),
+         libpam-faciolock (= ${binary:Version}),
          libkf6kcmutils-bin,
          systemsettings,
          qml6-module-qtquick,
@@ -66,6 +66,7 @@ Depends: ${shlibs:Depends},
          qml6-module-qtquick-layouts,
          qml6-module-org-kde-kirigami,
          qml6-module-org-kde-kcmutils
+Recommends: plasma-faciolock-greeters (= ${binary:Version})
 Description: IR face authentication for Linux - KDE Plasma settings module
  A System Settings page for Faciolock, and the same page as a "Face Unlock"
  entry in the application launcher. It shows whether you are enrolled and
@@ -75,9 +76,8 @@ Description: IR face authentication for Linux - KDE Plasma settings module
  It holds no privilege of its own. Every action runs faciolockctl through
  pkexec against the polkit action the daemon package already ships, so the
  panel can do exactly what you could do from a terminal and nothing more. It
- will not switch face authentication on or off; that is pam-auth-update's job
- and giving a settings page the power to rewrite the PAM stack is a wider
- boundary than a settings page needs.
+ can switch face authentication on or off through faciolockctl, which applies
+ the shared PAM profile and keeps the normal password path available.
  .
  Two kinds of dependency here are not found by dh_shlibdeps and are listed by
  hand. The five qml6-module-* packages are what the panel imports at runtime;
@@ -85,6 +85,20 @@ Description: IR face authentication for Linux - KDE Plasma settings module
  see them, and without them the page loads and renders nothing. The two
  programs are kcmshell6 for the launcher entry and systemsettings for the
  System Settings entry.
+
+Package: plasma-faciolock-greeters
+Architecture: all
+Depends: ${misc:Depends},
+         libpam-faciolock (= ${source:Version}),
+         plasma-desktop-data,
+         sddm,
+         sddm-theme-breeze,
+         qml6-module-qtcore,
+         qml6-module-org-kde-kirigami
+Description: Automatic face scanning in Plasma and SDDM greeters
+ A Breeze based SDDM theme and a Plasma lock screen wrapper that start a face
+ authentication attempt when the greeter appears. An animated face indicator
+ appears during the attempt, and the normal password controls remain available.
 
 Package: faciolock-models
 Architecture: all
