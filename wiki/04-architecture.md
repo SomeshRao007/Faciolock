@@ -52,7 +52,8 @@ Cost of the daemon: a resident process. Which we avoid — see below.
 
 1. `faciolock.socket` is a systemd socket unit. Nothing runs at boot.
 2. First `connect()` activates `faciolockd`. It loads models (mmap'd, so pages are
-   shared and demand-loaded), opens the camera, answers.
+   shared and demand-loaded). An authentication opens the camera, captures one burst,
+   and releases it before answering.
 3. After `idle_timeout` (default ~30 s) with no requests, the daemon exits. The
    socket unit stays; the next connect re-activates.
 4. ~~**Pre-warm**: a tiny user-session agent subscribes to the compositor's
@@ -110,9 +111,10 @@ So what the agent was meant to hide stays visible, and it is worth naming:
 | detect + embed + match | ~350 ms |
 | | **~1.5 s**, against the PAM module's 3 s deadline |
 
-Warm, only the last two rows are paid: **~750 ms**. `idle_timeout_secs` is therefore the real
-lever and the only honest one — it trades that ~800 ms against a resident process holding a
-camera. It is config, and the number is an operator's to choose.
+With a resident daemon, model loading is skipped but the camera still opens and settles
+for each attempt. The camera is released after each burst, with a six-second total capture
+limit including warmup and one retry. `idle_timeout_secs` controls only how long the daemon
+and its models remain resident; it no longer controls camera lifetime.
 
 **The daemon-side half of the pre-warm went the same way, and it took a bug to notice
 (P6-e).** `serve()` used to warm the camera in a thread as soon as it had a listener — the
@@ -123,7 +125,7 @@ front of it ([B29](11-bug-log.md#b29)). It could not have paid for itself in the
 PAM runs the auth stack before the account stack, so a `Clear`-triggered warm never precedes
 an `Auth`, and inside one login the arriving request just queues behind the warm's burst on
 the session mutex. The camera now opens for `Op::Auth` and `Op::Enroll` and for nothing else,
-and the table above is what the first one of those pays.
+then closes after each burst.
 
 ## IPC: what and why
 

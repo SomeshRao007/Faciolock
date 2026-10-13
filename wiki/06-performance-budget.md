@@ -3,7 +3,7 @@
 Targets are commitments, not aspirations. Each has a measurement method. If we can't
 measure it, we don't claim it.
 
-## Latency budget — warm path (daemon resident, camera pre-warmed)
+## Latency budget — measured warm camera (historical benchmark)
 
 **Restated 2026-08-04 after Phase 1**, single-threaded, Intel Core Ultra 5 225H, release
 build. Two decisions moved this table and they very nearly cancelled:
@@ -175,9 +175,10 @@ The daemon-side warm that stood in for it was deleted too, because "somebody con
 [P6-e](README.md#decisions-taken)).
 
 So **the first authentication after every idle-exit is a cold one**, and the cold table above
-is what it costs. The fallback is now the whole plan: `idle_timeout_secs`, config, default
-30 s — a longer timeout trades that ~800 ms against a resident process holding a camera, and
-that is an operator's trade rather than one to decide silently.
+is what it costs. The camera now closes after every burst, so even a resident daemon pays
+camera open and warmup on the next attempt. `idle_timeout_secs` (default 30 s) controls
+only daemon and model residency; it does not extend camera use. Each capture attempt has
+a six-second limit across warmup, burst, and one retry.
 
 ## Memory budget
 
