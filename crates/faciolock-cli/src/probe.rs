@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use faciolock_camera::{Capture, Geometry, enumerate};
 
@@ -51,7 +51,7 @@ fn median_abs(values: &[f64]) -> f64 {
 
 pub fn observe(node: &Path, geometry: Geometry) -> Result<Strobe, String> {
     let device = enumerate::open(node, geometry).map_err(|e| format!("{}: {e}", node.display()))?;
-    let mut capture = Capture::start(device, geometry, PROBE_WARMUP)
+    let mut capture = Capture::start(device, geometry, PROBE_WARMUP, Instant::now() + PROBE_DEADLINE)
         .map_err(|e| format!("{}: {e}", node.display()))?;
     let burst = capture
         .burst(PROBE_FRAMES, PROBE_DEADLINE)

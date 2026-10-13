@@ -40,7 +40,14 @@ public:
     {
         connect(&m_task, &QProcess::readyReadStandardOutput, this, &FaciolockKcm::readTask);
         connect(&m_task, &QProcess::readyReadStandardError, this, &FaciolockKcm::readTask);
+        connect(&m_task, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+            append(error == QProcess::FailedToStart
+                ? QStringLiteral("Could not start the authentication helper")
+                : QStringLiteral("The authentication helper stopped unexpectedly"));
+            refresh();
+        });
         connect(&m_task, &QProcess::finished, this, [this] {
+            readTask();
             m_pose.clear();
             append(m_task.exitCode() == 0 ? QStringLiteral("done") : QStringLiteral("failed"));
             refresh();
@@ -102,7 +109,10 @@ public:
         }
         m_log.clear();
         m_pose.clear();
-        QStringList args{Ctl, verb, user};
+        QStringList args{Ctl, verb};
+        if (verb != QLatin1String("enable") && verb != QLatin1String("disable")) {
+            args << user;
+        }
         if (verb == QLatin1String("remove")) {
             args << QStringLiteral("--yes");
         }
@@ -156,7 +166,10 @@ private:
         }
         const QString errors = QString::fromUtf8(m_task.readAllStandardError()).trimmed();
         if (!errors.isEmpty()) {
-            append(errors);
+            const QString verb = m_task.arguments().value(1);
+            append(verb == QLatin1String("enable") || verb == QLatin1String("disable")
+                ? QStringLiteral("Could not change face unlock")
+                : errors);
         }
         Q_EMIT changed();
     }
@@ -182,8 +195,15 @@ private:
     static bool pamProfileEnabled()
     {
         QFile profile(CommonAuth);
-        return profile.open(QIODevice::ReadOnly)
-            && profile.readAll().contains("pam_faciolock.so");
+        if (!profile.open(QIODevice::ReadOnly)) {
+            return false;
+        }
+        for (const QByteArray &line : profile.readAll().split('\n')) {
+            if (line.split('#').first().simplified().split(' ').contains("pam_faciolock.so")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     void append(const QString &line)

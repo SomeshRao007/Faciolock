@@ -39,7 +39,8 @@ What that means concretely:
   **assumed**. Some checks that sound obvious have already been refuted by measurement
   (see [B17](wiki/11-bug-log.md)); assume nothing on this page is true because it is
   plausible.
-- Faciolock will ship disabled by default and require explicit opt-in.
+- The PAM profile is enabled on a fresh install. Until a face is enrolled, authentication
+  falls through to the password prompt.
 
 If you need a second factor that resists a motivated attacker, use a hardware token.
 
@@ -194,8 +195,8 @@ Build them from a checkout:
 ./tools/mk-source-package.sh --binary
 ```
 
-**Installing does not enable anything.** The profile registers at `Default: no`, so no PAM
-stack names `pam_faciolock.so` until you run `pam-auth-update` and tick it. Then:
+The PAM profile is enabled on a fresh install. It falls through to your password until
+you enrol a face. To set up the camera and enrol:
 
 ```bash
 sudo faciolockctl diagnose --write
@@ -215,8 +216,8 @@ to join the group the socket is gated on, and log out and back in:
 sudo gpasswd -a $USER faciolock-auth
 ```
 
-Enable it on `sudo` alone first, hold a root shell in a second terminal while you do, and
-read the recovery path before you start: [`wiki/07`](wiki/07-desktop-and-packaging.md#rolling-it-out-and-getting-back-out).
+Switch face authentication off or back on from the System Settings page, or run
+`sudo faciolockctl disable` and `sudo faciolockctl enable`.
 Every failure mode — daemon down, not enrolled, rate-limited, refused — falls through to
 your password by construction, and the worst a broken PAM file can do is make one service
 refuse to authenticate. It cannot make a machine unbootable.

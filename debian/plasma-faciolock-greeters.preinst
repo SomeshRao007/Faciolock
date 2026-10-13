@@ -1,0 +1,22 @@
+#!/bin/sh
+set -e
+
+lockscreen=/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreen.qml
+stock=/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/FaciolockStockLockScreen.qml
+owner=$(dpkg-divert --listpackage "$lockscreen")
+
+if [ -n "$owner" ] && [ "$owner" != plasma-faciolock-greeters ]; then
+    echo "Cannot install Faciolock lock screen: $lockscreen is already diverted by $owner" >&2
+    exit 1
+fi
+
+if [ "$owner" = plasma-faciolock-greeters ] && [ "$(dpkg-divert --truename "$lockscreen")" != "$stock" ]; then
+    echo "Cannot install Faciolock lock screen: diversion target has changed" >&2
+    exit 1
+fi
+
+if [ -z "$owner" ]; then
+    dpkg-divert --package plasma-faciolock-greeters --add --rename --divert "$stock" "$lockscreen"
+fi
+
+#DEBHELPER#
