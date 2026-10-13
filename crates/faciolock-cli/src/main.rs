@@ -4,14 +4,16 @@ mod probe;
 mod store_dir;
 
 use std::io::{IsTerminal, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 use faciolock_ipc::{ENROL_POSES, Op, Verdict};
 
 use client::{Answer, DEADLINE};
 
 const DEFAULT_CONFIG: &str = "/etc/faciolock/faciolockd.toml";
+const GREETER_CONFIG: &str = "/etc/xdg/faciolock-greeter.conf";
 
 const USAGE: &str = "\
 faciolockctl — manage Faciolock enrolments
@@ -21,13 +23,15 @@ faciolockctl — manage Faciolock enrolments
   remove USER [--yes]  delete an enrolment
   test [USER]          one authentication, exactly as PAM would ask for it
   status [USER]        whether USER is enrolled; no root, no camera
+  enable               turn face authentication on systemwide (root)
+  disable              turn face authentication off systemwide (root)
   bench [-n N] [USER]  N authentications; p50/p95/p99
   diagnose [--write]   what this machine has, and the config for it
 
   --config PATH        the daemon's config (default /etc/faciolock/faciolockd.toml)
 
 USER defaults to $SUDO_USER, so `sudo faciolockctl enroll` does the obvious thing.
-`status` and `diagnose` run as you; the rest need root, because the store is 0700.";
+`status` and `diagnose` run as you; other commands need root to manage enrolments or system settings.";
 
 #[derive(serde::Deserialize)]
 #[serde(default)]
@@ -89,8 +93,11 @@ fn run(args: &[String]) -> Result<(), String> {
         }
     }
 
-    let settings = Settings::load(&config)?;
     let (command, rest) = rest.split_first().map_or(("", &[][..]), |(c, r)| (*c, r));
+    if matches!(command, "enable" | "disable") {
+        return needs_root(command).and_then(|()| set_pam_enabled(command == "enable", rest));
+    }
+    let settings = Settings::load(&config)?;
 
     match command {
         "" => {
@@ -107,6 +114,62 @@ fn run(args: &[String]) -> Result<(), String> {
         "bench" => needs_root(command).and_then(|()| bench(&settings, rest)),
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
     }
+}
+
+fn set_pam_enabled(enabled: bool, rest: &[&str]) -> Result<(), String> {
+    if !rest.is_empty() {
+        return Err("enable and disable do not take a username or other arguments".into());
+    }
+    let flag = if enabled { "--enable" } else { "--disable" };
+    let status = Command::new("/usr/sbin/pam-auth-update")
+        .args([flag, "faciolock"])
+        .status()
+        .map_err(|e| format!("could not run pam-auth-update: {e}"))?;
+    if !status.success() {
+        return Err(format!("pam-auth-update failed with {status}"));
+    }
+    let common_auth = std::fs::read_to_string("/etc/pam.d/common-auth")
+        .map_err(|e| format!("could not check the PAM profile: {e}"))?;
+    if profile_enabled(&common_auth) != enabled {
+        return Err("pam-auth-update did not change common-auth; check for local PAM edits".into());
+    }
+    sync_greeter(enabled)?;
+    println!("face authentication {}", if enabled { "enabled" } else { "disabled" });
+    Ok(())
+}
+
+fn sync_greeter(enabled: bool) -> Result<(), String> {
+    let target = Path::new(GREETER_CONFIG);
+    let parent = target.parent().ok_or("invalid greeter setting path")?;
+    if !parent.is_dir() {
+        std::fs::create_dir_all(parent)
+            .and_then(|()| std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)))
+            .map_err(|e| format!("could not create the greeter settings directory: {e}"))?;
+    }
+    let staging = target.with_extension(format!("conf.{}", std::process::id()));
+    let result = (|| -> std::io::Result<()> {
+        std::fs::write(&staging, greeter_config(enabled))?;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o644))?;
+        std::fs::rename(&staging, target)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    result.map_err(|e| format!("could not update the greeter setting: {e}"))
+}
+
+fn greeter_config(enabled: bool) -> &'static str {
+    if enabled { "[FaceUnlock]\nenabled=true\n" } else { "[FaceUnlock]\nenabled=false\n" }
+}
+
+fn profile_enabled(common_auth: &str) -> bool {
+    common_auth.lines().any(|line| {
+        line.split('#')
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .any(|word| word == "pam_faciolock.so")
+    })
 }
 
 fn subject(rest: &[&str]) -> Result<String, String> {
@@ -129,6 +192,10 @@ fn me(rest: &[&str]) -> Result<String, String> {
 fn needs_root(command: &str) -> Result<(), String> {
     match unsafe { libc::geteuid() } {
         0 => Ok(()),
+        _ if matches!(command, "enable" | "disable") => Err(format!(
+            "`{command}` needs root to change system PAM settings.\n\
+             Try:  sudo faciolockctl {command}"
+        )),
         // Not the socket any more -- P6-d opened that to faciolock-auth. What is left is the
         // store at 0700, and may_ask refusing Enroll and Clear to anyone but root.
         _ => Err(format!(
@@ -530,6 +597,48 @@ fn sample_of(means: &[f64]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pam_profile_state_ignores_comments_and_refuses_extra_arguments() -> Result<(), String> {
+        let enabled = "auth [success=1 default=ignore] pam_faciolock.so\n";
+        let commented = "# auth [success=1 default=ignore] pam_faciolock.so\n\
+                         auth optional pam_unix.so # pam_faciolock.so\n";
+        if !profile_enabled(enabled) || profile_enabled(commented) {
+            return Err("the PAM toggle must read only an active module line".into());
+        }
+        if set_pam_enabled(true, &["alice"]).is_ok()
+            || set_pam_enabled(false, &["--yes"]).is_ok()
+        {
+            return Err("the systemwide toggle must reject arguments before running pam-auth-update".into());
+        }
+        if !greeter_config(true).contains("enabled=true")
+            || !greeter_config(false).contains("enabled=false")
+        {
+            return Err("the greeter gate must match the PAM toggle".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_pam_toggle_does_not_depend_on_the_daemon_config() -> Result<(), String> {
+        let config = std::env::temp_dir().join(format!(
+            "faciolockctl-bad-toggle-config-{}",
+            std::process::id()
+        ));
+        std::fs::write(&config, "invalid = [")
+            .map_err(|e| format!("could not write test config: {e}"))?;
+        let result = run(&[
+            "--config".into(),
+            config.to_string_lossy().into_owned(),
+            "disable".into(),
+            "extra".into(),
+        ]);
+        let _ = std::fs::remove_file(&config);
+        match result {
+            Err(reason) if reason.contains("needs root") || reason.contains("do not take") => Ok(()),
+            _ => Err("disable reached daemon config parsing before its root/argument guard".into()),
+        }
+    }
 
     #[test]
     fn diagnose_reports_the_socket_without_connecting_to_it() {

@@ -1,0 +1,22 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = remove ] || [ "$1" = purge ] || [ "$1" = abort-install ]; then
+    theme=/etc/sddm.conf.d/zz-faciolock.conf
+    if [ -f "$theme" ] && [ "$(cat "$theme")" = "$(printf '[Theme]\nCurrent=faciolock')" ]; then
+        rm -f "$theme"
+    fi
+
+    lockscreen=/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreen.qml
+    stock=/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/FaciolockStockLockScreen.qml
+    if [ "$(dpkg-divert --listpackage "$lockscreen")" = plasma-faciolock-greeters ] &&
+       [ "$(dpkg-divert --truename "$lockscreen")" = "$stock" ]; then
+        dpkg-divert --package plasma-faciolock-greeters --remove --rename "$lockscreen"
+    fi
+fi
+
+if [ "$1" = purge ]; then
+    rm -f /etc/xdg/faciolock-greeter.conf
+fi
+
+#DEBHELPER#

@@ -13,10 +13,8 @@
 # is put the same files in the same places so the unit files and the pam-configs profile are
 # exercised as written, and `--remove` puts the machine back.
 #
-# **It does not touch /etc/pam.d and does not run pam-auth-update.** Enabling face
-# authentication is a separate, deliberate step with its own recovery story -- wiki/07,
-# "Rolling it out, and getting back out". Installing the module is not enabling it: nothing
-# loads pam_faciolock.so until a PAM file names it.
+# The package profile enables face authentication by default. This installer
+# applies the same profile through pam-auth-update and keeps password fallback.
 
 set -eu
 
@@ -25,11 +23,34 @@ libexec=/usr/libexec/faciolock
 share=/usr/share/faciolock
 secdir="$(ls -d /usr/lib/*/security 2>/dev/null | head -1)"
 profile=release
+lockscreen=/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreen.qml
+stocklock=/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/FaciolockStockLockScreen.qml
+greeterdir=/usr/share/sddm/themes/faciolock
 
 [ "$(id -u)" -eq 0 ] || { echo "needs root. try: sudo $0 $*" >&2; exit 2; }
 
 if [ "${1:-}" = "--remove" ]; then
+	if [ "$(dpkg-divert --listpackage "$lockscreen")" = plasma-faciolock-greeters ]; then
+		echo "the packaged greeter is installed; remove its package instead" >&2
+		exit 2
+	fi
+	if [ "$(dpkg-divert --listpackage "$lockscreen")" = LOCAL ] &&
+	   [ "$(dpkg-divert --truename "$lockscreen")" != "$stocklock" ]; then
+		echo "the lock screen has another local diversion" >&2
+		exit 2
+	fi
 	echo "stopping and disabling"
+	pam-auth-update --package --remove faciolock
+	if [ "$(dpkg-divert --listpackage "$lockscreen")" = LOCAL ] &&
+	   [ "$(dpkg-divert --truename "$lockscreen")" = "$stocklock" ]; then
+		rm -f "$lockscreen" /usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/FaceScanIndicator.qml
+		dpkg-divert --local --remove --rename "$lockscreen"
+	fi
+	if [ -f /etc/sddm.conf.d/zz-faciolock.conf ] &&
+	   [ "$(cat /etc/sddm.conf.d/zz-faciolock.conf)" = "$(printf '[Theme]\nCurrent=faciolock')" ]; then
+		rm -f /etc/sddm.conf.d/zz-faciolock.conf
+	fi
+	rm -rf "$greeterdir"
 	systemctl disable --now faciolock.socket 2>/dev/null || true
 	systemctl stop faciolock.service 2>/dev/null || true
 	rm -f /etc/systemd/system/faciolock.socket /etc/systemd/system/faciolock.service
@@ -48,7 +69,6 @@ if [ "${1:-}" = "--remove" ]; then
 	echo "  the faciolock user    userdel faciolock"
 	echo "  faciolock-auth        groupdel faciolock-auth (and your membership goes with it)"
 	echo
-	echo "if you enabled PAM, undo that separately:  pam-auth-update --remove faciolock"
 	exit 0
 fi
 
@@ -57,6 +77,11 @@ fi
 # measured against a debug install is a measurement of the profile.
 [ -x "$root/target/$profile/faciolockd" ] || { echo "build it first:  cargo build --release" >&2; exit 2; }
 [ -n "$secdir" ] || { echo "no PAM security directory found under /usr/lib/*/security" >&2; exit 2; }
+[ -f "$lockscreen" ] || [ "$(dpkg-divert --listpackage "$lockscreen")" = LOCAL ] || { echo "Plasma lock screen file not found" >&2; exit 2; }
+[ -f /usr/share/sddm/themes/breeze/Main.qml ] || { echo "Breeze SDDM theme not found" >&2; exit 2; }
+owner=$(dpkg-divert --listpackage "$lockscreen")
+[ -z "$owner" ] || [ "$owner" = LOCAL ] || { echo "lock screen is diverted by $owner" >&2; exit 2; }
+[ "$owner" != LOCAL ] || [ "$(dpkg-divert --truename "$lockscreen")" = "$stocklock" ] || { echo "lock screen has another local diversion" >&2; exit 2; }
 
 echo "user and group"
 install -m 0644 "$root/data/sysusers.d/faciolock.conf" /usr/lib/sysusers.d/faciolock.conf
@@ -95,10 +120,34 @@ echo "polkit"
 install -d -m 0755 /usr/share/polkit-1/actions
 install -m 0644 "$root/data/polkit/org.faciolock.policy" /usr/share/polkit-1/actions/
 
-echo "PAM module (installed, NOT enabled)"
+echo "PAM module and default profile"
 install -s -m 0644 "$root/target/$profile/libpam_faciolock.so" "$secdir/pam_faciolock.so"
 install -d -m 0755 /usr/share/pam-configs
 install -m 0644 "$root/data/pam-configs/faciolock" /usr/share/pam-configs/faciolock
+pam-auth-update --package
+
+echo "login and lock-screen themes"
+install -d -m 0755 "$greeterdir"
+install -m 0644 "$root/data/greeters/sddm/faciolock"/* "$greeterdir/"
+install -m 0644 "$root/data/greeters/FaceScanIndicator.qml" "$greeterdir/"
+install -d -m 0755 /etc/sddm.conf.d /etc/xdg
+if [ ! -e /etc/sddm.conf.d/zz-faciolock.conf ]; then
+	printf '[Theme]\nCurrent=faciolock\n' > /etc/sddm.conf.d/zz-faciolock.conf
+fi
+if [ "$owner" != LOCAL ]; then
+	dpkg-divert --local --add --rename --divert "$stocklock" "$lockscreen"
+fi
+install -m 0644 "$root/data/greeters/lockscreen/LockScreen.qml" "$lockscreen"
+install -m 0644 "$root/data/greeters/FaceScanIndicator.qml" "$(dirname "$lockscreen")/"
+if awk '{ sub(/#.*/, ""); for (i = 1; i <= NF; i++) if ($i == "pam_faciolock.so") found=1 } END { exit !found }' /etc/pam.d/common-auth; then
+	enabled=true
+else
+	enabled=false
+fi
+config=$(mktemp /etc/xdg/.faciolock-greeter.conf.XXXXXX)
+chmod 0644 "$config"
+printf '[FaceUnlock]\nenabled=%s\n' "$enabled" > "$config"
+mv -f "$config" /etc/xdg/faciolock-greeter.conf
 
 # Built here rather than by cargo, so it is skipped when the KF6 development packages are
 # absent instead of failing an install that has nothing else wrong with it. The panel is the
@@ -124,8 +173,7 @@ systemctl restart faciolock.socket
 echo
 systemd-analyze security faciolock.service | tail -1
 echo
-echo "installed. nothing is running yet -- the socket is listening and the daemon starts on"
-echo "the first connect. next:"
+echo "installed. the socket is listening and the daemon starts on the first connect. next:"
 echo
 echo "  faciolockctl diagnose --write     find the camera, record the tier"
 echo "  faciolockctl enroll \$USER         three poses"
@@ -137,4 +185,4 @@ echo "you also have to join the group the socket is gated on, and log out and ba
 echo
 echo "  gpasswd -a \$SUDO_USER faciolock-auth"
 echo
-echo "only then, and read wiki/07 first:  the /etc/pam.d/sudo line, or pam-auth-update"
+echo "face authentication is enabled by default; use faciolockctl disable to turn it off"
