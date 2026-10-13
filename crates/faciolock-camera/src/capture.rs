@@ -111,7 +111,12 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn start(dev: Device, geom: Geometry, warmup: usize) -> Result<Capture, CaptureError> {
+    pub fn start(
+        dev: Device,
+        geom: Geometry,
+        warmup: usize,
+        until: Instant,
+    ) -> Result<Capture, CaptureError> {
         let handle = dev.handle();
         let mut stream = MmapStream::with_buffers(&dev, Type::VideoCapture, BUFFERS)
             .map_err(CaptureError::from_io)?;
@@ -119,7 +124,7 @@ impl Capture {
 
         let mut cap = Capture { stream, handle, _dev: dev, geom };
         for _ in 0..warmup.max(1) {
-            cap.take(Instant::now() + STREAM_TIMEOUT)?;
+            cap.take(until)?;
         }
         Ok(cap)
     }
@@ -130,7 +135,7 @@ impl Capture {
 
     pub fn burst(&mut self, want: usize, deadline: Duration) -> Result<CapturedBurst, CaptureError> {
         let until = Instant::now() + deadline;
-        self.flush()?;
+        self.flush(until)?;
 
         let stride = self.geom.stride();
         let mut planar = Vec::with_capacity(want * stride);
@@ -169,8 +174,11 @@ impl Capture {
         })
     }
 
-    fn flush(&mut self) -> Result<(), CaptureError> {
-        while self.ready(0)? {
+    fn flush(&mut self, until: Instant) -> Result<(), CaptureError> {
+        while self.ready(None)? {
+            if Instant::now() >= until {
+                return Err(CaptureError::Stalled { got: 0, want: 1 });
+            }
             self.next_raw()?;
         }
         Ok(())
@@ -183,19 +191,24 @@ impl Capture {
 
     fn wait_ready(&mut self, until: Instant) -> Result<(), CaptureError> {
         loop {
-            let left = until.saturating_duration_since(Instant::now());
-            if left.is_zero() {
+            if Instant::now() >= until {
                 return Err(CaptureError::Stalled { got: 0, want: 1 });
             }
-            let ms = i32::try_from(left.as_millis()).unwrap_or(i32::MAX).max(1);
-            if self.ready(ms)? {
+            if self.ready(Some(until))? {
                 return Ok(());
             }
         }
     }
 
-    fn ready(&self, timeout_ms: i32) -> Result<bool, CaptureError> {
+    fn ready(&self, until: Option<Instant>) -> Result<bool, CaptureError> {
         for _ in 0..EINTR_RETRIES {
+            let timeout_ms = match until {
+                Some(until) => match poll_timeout(until, Instant::now()) {
+                    Some(ms) => ms,
+                    None => return Ok(false),
+                },
+                None => 0,
+            };
             match self.handle.poll(libc_pollin(), timeout_ms) {
                 Ok(n) => return Ok(n > 0),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -230,6 +243,14 @@ impl Capture {
     }
 }
 
+fn poll_timeout(until: Instant, now: Instant) -> Option<i32> {
+    let left = until.saturating_duration_since(now);
+    if left.is_zero() {
+        return None;
+    }
+    Some(i32::try_from(left.as_millis()).unwrap_or(i32::MAX).max(1))
+}
+
 struct RawMeta {
     sequence: u32,
     timestamp: Duration,
@@ -246,6 +267,25 @@ pub const REQUIRED_FORMAT: v4l::FourCC = GREY;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interrupted_polls_use_only_the_remaining_time() -> Result<(), String> {
+        let now = Instant::now();
+        if poll_timeout(now - Duration::from_millis(1), now).is_some() {
+            return Err("an expired poll got a new wait budget".into());
+        }
+        let until = now + Duration::from_millis(20);
+        let Some(first) = poll_timeout(until, now) else {
+            return Err("a future poll has no budget".into());
+        };
+        let Some(after_interrupt) = poll_timeout(until, now + Duration::from_millis(5)) else {
+            return Err("the interrupted poll has no remaining budget".into());
+        };
+        if after_interrupt >= first {
+            return Err("an interrupted poll reset its timeout".into());
+        }
+        Ok(())
+    }
 
     #[test]
     fn stride_is_the_frame_size_the_corpus_uses() {
