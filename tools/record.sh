@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Record a raw Y800 burst from the IR camera into corpus/ with a metadata sidecar.
 #
-# Phase 0 tool. ffmpeg does the capture; this only resolves the device, names the
+# ffmpeg does the capture; this only resolves the device, names the
 # output, and records the conditions so a file is still self-describing in a month.
 #
 # Usage:  tools/record.sh <label> [frames] [note] [ambient]
@@ -23,10 +23,9 @@ label="${1:-}"
 frames="${2:-90}"    # 90 frames; how long that takes is measured, not assumed -- see below
 note="${3:-}"
 
-# Ambient lighting. Recorded because on 2026-08-06 it turned out to be the variable that
-# decides whether this hardware's emitter strobe is visible at all: every capture before
-# that date was made after dark, nothing recorded that fact, and the whole corpus turned
-# out to describe one lighting condition without saying so. wiki/11 B18.
+# Ambient lighting. Recorded because it is the variable that decides how visible this
+# hardware's emitter strobe is at all: a set of captures made only after dark, with nothing
+# recording that fact, describes one lighting condition without saying so.
 ambient="${4:-}"
 
 if [[ -z "$label" ]]; then
@@ -48,7 +47,7 @@ fi
 # --- resolve the IR camera -------------------------------------------------
 #
 # by-path, not by-id: by-id collides between the RGB and IR interfaces of this
-# USB device and resolves to the RGB camera.  wiki/10 Probe 4.
+# USB device and resolves to the RGB camera.
 #
 # We do not trust the symlink blindly -- the format check below is what actually
 # confirms we have the IR sensor.
@@ -64,7 +63,7 @@ done
 
 if [[ -z "$device" ]]; then
     echo "error: no capture device offering GREY found under /dev/v4l/by-path/" >&2
-    echo "       run: tools/probe-devices.sh   (or see wiki/10-hardware-probe.md)" >&2
+    echo "       list them with: v4l2-ctl --list-devices" >&2
     exit 1
 fi
 
@@ -105,7 +104,7 @@ echo "RECORDING"
 # and destroys the pairing every liveness check depends on -- silently, because the
 # file is the right size and every individual frame is valid.
 #
-# The signalstats probe in wiki/10 never hit this because -f null encodes nothing and
+# A signalstats probe with -f null never hits this because it encodes nothing and
 # so does no frame-rate conversion. Any capture written to disk needs this flag.
 started=$(date +%s.%N)
 
@@ -136,10 +135,10 @@ fi
 # fps_delivered, not fps.
 #
 # The old sidecar recorded "fps": 30 -- the value this script *asked for*, written as
-# though it were an observation. It is not: the sensor delivered 14.7 fps on 2026-08-06,
+# though it were an observation. It is not: the sensor delivered 14.7 fps,
 # and `VIDIOC_G_PARM` reports the configured rate too, so nothing in the project had ever
-# measured the real one. Same shape as B4: a capture that misdescribes itself is worse
-# than one that says nothing, because the wrong number gets quoted. wiki/11 B19.
+# measured the real one. A capture that misdescribes itself is worse
+# than one that says nothing, because the wrong number gets quoted.
 fps_delivered=$(echo "scale=2; ${actual} / ${elapsed}" | bc)
 
 cat > "${base}.json" <<EOF

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ratelimit-try -- Phase 4's exit criteria, the parts no `cargo test` can reach.
+# ratelimit-try -- the rate limiter's guarantees, the parts no `cargo test` can reach.
 #
 #   "Kill the daemon mid-backoff, restart, backoff persists."
 #   "Journal shows every attempt."
@@ -9,15 +9,14 @@
 # write happens BEFORE the reply -- a limiter that flushed only on a clean shutdown would
 # pass that test and fail this script, and `kill -9` is the only thing that tells them apart.
 #
-# Needs root, because the daemon's socket is SO_PEERCRED-gated (wiki/03 R2) and every leg
+# Needs root, because the daemon's socket is SO_PEERCRED-gated and every leg
 # below goes through the real socket. Needs NO camera and NO enrolment: `Limiter::decide`
 # runs before the template load and before the burst, which is exactly the property being
 # checked.
 #
 #   sudo ./tools/ratelimit-try.sh
 #
-# Not shipped, not a test. It exists so a human can watch it happen and write "observed" in
-# wiki/09 rather than "pending".
+# Not shipped, not a test. It exists so a human can watch it happen.
 
 set -u
 
@@ -116,7 +115,7 @@ check "daemon is up" "yes" "$([ -d "/proc/$pid" ] && echo yes || echo no)"
 check "a locked uid gets RateLimited" "RateLimited" "$(ask auth)"
 
 echo
-echo "PART 2 -- Op::Clear releases the lockout (P4-b)"
+echo "PART 2 -- Op::Clear releases the lockout"
 echo
 
 check "clear is acknowledged" "Ack" "$(ask clear)"
@@ -150,7 +149,7 @@ check "the clear still works after a restart" "Ack" "$(ask clear)"
 check "leaving the user free" "NoEnrolment" "$(ask auth)"
 
 echo
-echo "PART 4 -- the journal line (wiki/03 R9)"
+echo "PART 4 -- the journal line"
 echo
 grep -E '^<[0-9]>faciolockd: (auth|clear) ' "$run/log" | sed 's/^/  /'
 echo

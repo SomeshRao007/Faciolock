@@ -3,7 +3,7 @@
 
 Never issues SET_CUR, never writes a control. It streams and it reads.
 
-Why this exists: wiki/11 B20 showed the ambient gate keys on a quantity the *attacker*
+Why this exists: the ambient gate was found to key on a quantity the *attacker*
 sets -- presenting a bright object near the lens collapses the measured floor 2,170x,
 because the sensor AGC shortens exposure and the ambient pedestal follows. That diagnosis
 is an inference from two columns of a table. If the camera reports its exposure time
@@ -18,16 +18,16 @@ lights up both metadata formats on /dev/video3:
 
 Two things would be worth having, per "Microsoft Extensions to USB Video Class 1.5":
 
-    CaptureStats        -- ExposureTime, which is what B20 needs
+    CaptureStats        -- ExposureTime, which is what the ambient gate needs
     FrameIllumination   -- per-frame ON/OFF ground truth, which would replace
-                           frame::classify inferring phase from luma (B18)
+                           frame::classify inferring phase from luma
 
 **The MetadataId values and the CaptureStats field layout below are from the MSXU spec
 and have not been re-read against it here.** So this dumps raw bytes first and decodes
 second, and prints both: a wrong constant shows up as a decode that disagrees with the
 hex, rather than as a confident wrong number. The decode is additionally checked against
-something already known to be true -- the emitter alternates every frame (wiki/10 Probe 3,
-four independent runs) -- so an illumination flag that tracks the measured frame means is
+something already known to be true -- the emitter alternates every frame (four
+independent runs) -- so an illumination flag that tracks the measured frame means is
 self-proving and one that does not is refuted.
 """
 
@@ -63,7 +63,7 @@ FOURCC_UVCM = 0x4D435655  # 'UVCM'
 
 WIDTH, HEIGHT = 640, 360
 
-# Frames dropped from the head before the ON/OFF comparison. wiki/10 Probe 3 measured
+# Frames dropped from the head before the ON/OFF comparison. A hardware probe measured
 # 22.7, 23.4, 14.3, 31.4 before the AGC settles into a clean alternation -- four frames.
 # This spike streams raw, with none of the daemon's warm-up, so it pays that here.
 SETTLE = 4
@@ -120,7 +120,7 @@ def reqbufs(fd, buf_type, count):
 
 # struct v4l2_buffer on a 64-bit kernel, laid out field by field because the two
 # 8-byte members (timeval, the `m` union) put padding in places a naive run of u32s
-# gets wrong -- which is exactly the class of bug P2-a chose the `v4l` crate to avoid
+# gets wrong -- which is exactly the class of bug the `v4l` crate is there to avoid
 # in the shipped code. A spike may hand-roll it; it may not guess at it.
 #
 #   0 index    4 type      8 bytesused  12 flags   16 field   (20 pad)
@@ -385,7 +385,7 @@ def run(video_path, meta_path, want_format, frames):
             return
 
         # **The decode has to be checked against something already known.** The emitter
-        # alternates every frame (wiki/10 Probe 3, four independent runs), so an
+        # alternates every frame (four independent runs), so an
         # illumination tag that is real must line up with the frame means. A tag that
         # does not is a wrong constant, not a discovery.
         settled = [(m, t) for m, t in list(zip(means, tags))[SETTLE:] if t is not None]
@@ -414,7 +414,7 @@ if __name__ == "__main__":
     video = sys.argv[1] if len(sys.argv) > 1 else "/dev/video2"
     meta = sys.argv[2] if len(sys.argv) > 2 else "/dev/video3"
     fmt = FOURCC_UVCH if "--uvch" in sys.argv else FOURCC_UVCM
-    # 30 frames is ~2.5 s at the measured 12-15 fps (B19), which gives the ON/OFF
+    # 30 frames is ~2.5 s at the measured 12-15 fps, which gives the ON/OFF
     # comparison roughly a dozen samples a side rather than three.
     count = 30
     run(video, meta, fmt, count)

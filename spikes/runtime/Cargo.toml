@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# Zero dependencies beyond the runtime under test. Q2 is decided (tract), so the ort
-# half of this spike is gone -- its numbers live in wiki/08 Q2, which is where a
-# rejected option belongs. Keeping it behind a feature flag would be carrying a build
+# Zero dependencies beyond the runtime under test. The runtime is decided (tract), so the
+# ort half of this spike is gone. Keeping it behind a feature flag would be carrying a build
 # path nobody builds.
 [dependencies]
 tract-onnx = "0.23.4"

@@ -5,15 +5,14 @@ faciolock (0.1.0~ppa3) resolute; urgency=medium
     pair must show OFF/ON <= 0.9 and ON-OFF >= 5 levels, and both are enforced
     rather than advisory. Recorded daylight captures enrol and verify with
     these defaults. A daylight run on hardware is still owed.
-  * What that costs, stated here rather than left in the wiki: the margin the
-    darkness threshold held against a pulsed infrared source (wiki B9) does
-    not carry over, and extra infrared beside a genuinely enrolled face is not
-    categorically rejected.
+  * What that costs: the margin the darkness threshold held against a pulsed
+    infrared source does not carry over, and extra infrared beside a genuinely
+    enrolled face is not categorically rejected.
   * The detector's score floor rose from 0.3 to 0.8.
   * faciolockctl diagnose reports modulation and signal/noise in place of a
     bright/dark ratio, and its advice no longer blames the room.
   * README.Debian and faciolockctl(1) said daylight refuses. They no longer do.
-  * A printed face is still not reliably rejected (wiki B24).
+  * A printed face is still not reliably rejected.
   * Enable the face PAM profile by default and add a system-wide On/Off toggle
     through faciolockctl and the Plasma settings page.
   * Start face scanning automatically at SDDM login and Plasma screen unlock;
@@ -24,7 +23,7 @@ faciolock (0.1.0~ppa3) resolute; urgency=medium
 
 faciolock (0.1.0~ppa2) resolute; urgency=medium
 
-  * Phase 8. A settings page, so enrolment stops requiring a terminal.
+  * A settings page, so enrolment stops requiring a terminal.
   * New binary package plasma-faciolock-kcm: a KDE System Settings module and
     a matching "Face Unlock" launcher entry. It holds no privilege of its own
     and runs faciolockctl through the existing polkit action. It will not turn
@@ -32,25 +31,24 @@ faciolock (0.1.0~ppa2) resolute; urgency=medium
   * faciolockctl gained "status", which needs no root and touches no camera.
   * Fix: a closed stdin captured all three enrolment poses back to back,
     without waiting for the person to move, and saved them as a complete
-    enrolment. It never failed, so it was never noticed (wiki B32).
+    enrolment. It never failed, so it was never noticed.
   * The panel's QML modules are declared by hand. They are compiled into the
     plugin as a Qt resource, where dh_shlibdeps cannot find them, and without
-    them the page loads blank (wiki B33).
-  * GNOME and GDM remain untested rather than claimed; see
-    /usr/share/doc/faciolock/07-desktop-and-packaging.md.
+    them the page loads blank.
+  * GNOME and GDM remain untested rather than claimed.
 
  -- Somesh Rao <cokasomeshrao@outlook.com>  Fri, 04 Sep 2026 00:00:00 +0530
 
 faciolock (0.1.0~ppa1) resolute; urgency=medium
 
-  * Initial release. Phase 7 of the roadmap; the first packaged build.
+  * Initial release; the first packaged build.
   * Three binary packages: faciolock (daemon, CLI, units), libpam-faciolock
     (the module and its pam-auth-update profile), faciolock-models (weights).
   * Face authentication ships disabled. The profile registers at
     "Default: no", so pam-auth-update leaves every stack untouched until an
     administrator enables it.
   * Known limitations at this version, both measured rather than suspected:
-    face authentication refuses in bright daylight (wiki B18), and a printed
-    face is not reliably rejected by the liveness checks (wiki B24).
+    face authentication refuses in bright daylight, and a printed face is not
+    reliably rejected by the liveness checks.
 
  -- Somesh Rao <cokasomeshrao@outlook.com>  Mon, 31 Aug 2026 19:57:01 +0530

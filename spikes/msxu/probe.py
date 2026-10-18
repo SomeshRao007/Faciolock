@@ -6,7 +6,7 @@ Issues GET requests only -- never SET_CUR. Nothing on the device changes.
 Why this exists: the IR camera's MSXU (unit 4, GUID {0f3f95dc-...}) advertises
 MSXU_CONTROL_FACE_AUTHENTICATION (selector 0x06, bit D5 of bmControls). Windows Hello
 sets that control; Linux never has. If the firmware switches capture mode when it is
-set, the ambient-IR ceiling in wiki/11 B18 is a software gap, not a hardware one.
+set, the ambient-IR ceiling on strobe liveness is a software gap, not a hardware one.
 
 Spec: Microsoft Extensions to USB Video Class 1.5, section 2.2.2.6.
 Modes, from KSPROPERTY_CAMERACONTROL_EXTENDED_FACEAUTH_MODE:
@@ -124,7 +124,7 @@ def capture_means(dev, frames=40):
     """Per-frame mean luma via the same ffmpeg invocation record.sh uses.
 
     `-fps_mode passthrough` is not optional: without it ffmpeg duplicates frames to fill
-    a constant 30 fps and turns ON,off,ON,off into ON,ON,off,off (wiki/11 B5).
+    a constant 30 fps and turns ON,off,ON,off into ON,ON,off,off.
     """
     import subprocess
     w, h = 640, 360
@@ -139,7 +139,7 @@ def capture_means(dev, frames=40):
 
 
 def report(label, means, settle=5):
-    """Ambient floor and strobe amplitude, in the difference domain B18 forced."""
+    """Ambient floor and strobe amplitude, in the difference domain, where the ambient pedestal cancels."""
     m = means[settle:]
     if len(m) < 3:
         print(f"  {label}: only {len(m)} frames, cannot measure")

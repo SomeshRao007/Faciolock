@@ -196,7 +196,7 @@ fn needs_root(command: &str) -> Result<(), String> {
             "`{command}` needs root to change system PAM settings.\n\
              Try:  sudo faciolockctl {command}"
         )),
-        // Not the socket any more -- P6-d opened that to faciolock-auth. What is left is the
+        // Not the socket any more -- that is open to faciolock-auth. What is left is the
         // store at 0700, and may_ask refusing Enroll and Clear to anyone but root.
         _ => Err(format!(
             "`{command}` needs root — the store is 0700, and the daemon takes enrolment\n\
@@ -714,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_the_paths_wiki_04_specifies() {
+    fn the_defaults_are_the_specified_paths() {
         let s = Settings::default();
         assert_eq!(s.socket, Path::new("/run/faciolock.sock"));
         assert_eq!(s.templates, Path::new("/var/lib/faciolock/templates"));

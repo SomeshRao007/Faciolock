@@ -38,7 +38,7 @@ override_dh_auto_install:
 # --no-act` lists dh_installtmpfiles and dh_installsystemduser and not this one.
 # Without the explicit call the sysusers file ships and nothing ever reads it,
 # so the faciolock user is never created and the daemon cannot start. The build
-# is green either way; see wiki/11 B31.
+# is green either way.
 execute_after_dh_install:
 	dh_installsysusers
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check-qml-deps -- every QML module the panel imports must be a declared dependency.
 #
-# This is wiki/11 B33 as a check. `kcmutils_add_qml_kcm` compiles ui/ into a Qt resource
+# `kcmutils_add_qml_kcm` compiles ui/ into a Qt resource
 # inside the plugin, so the imports are string data in the .so and `dh_shlibdeps` -- which
 # reads DT_NEEDED out of ELF -- has nothing to find. The C++ half of a QML KCM declares its
 # dependencies. The QML half does not, and nothing warns you.
@@ -39,7 +39,7 @@ done < <(grep -oP '^import \K[A-Za-z][A-Za-z0-9._]*' "$qml" | sort -u)
 [ "$missing" -eq 0 ] || {
 	echo
 	echo "Add the package(s) above to plasma-faciolock-kcm's Depends in debian/control."
-	echo "dh_shlibdeps cannot find these; see wiki/11 B33."
+	echo "dh_shlibdeps cannot find these; they are not ELF dependencies."
 	exit 1
 }
 

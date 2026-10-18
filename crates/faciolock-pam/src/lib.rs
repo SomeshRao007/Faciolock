@@ -210,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn the_failure_codes_are_the_ones_wiki_03_specifies() {
+    fn the_failure_codes_are_the_specified_ones() {
         assert_eq!(code_for(Verdict::Deny), 7, "PAM_AUTH_ERR");
         assert_eq!(code_for(Verdict::NoEnrolment), 10, "PAM_USER_UNKNOWN");
         assert_eq!(code_for(Verdict::Unavailable), 9, "PAM_AUTHINFO_UNAVAIL");

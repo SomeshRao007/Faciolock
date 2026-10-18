@@ -134,7 +134,7 @@ fn ambient_light_changes_the_ratio_but_not_the_difference() {
     eprintln!(
         "\n{checked} captures. `pedestal` is the ambient floor: the variable that separates \
          the nocturnal\ncorpus from the daylight one, and the variable nothing recorded until \
-         B18.\n"
+         ambient light was found to saturate every strobe ratio.\n"
     );
 }
 
@@ -259,7 +259,8 @@ fn a_per_pair_dark_frame_statistic_that_survives_ambient_light() {
     }
     eprintln!(
         "\nA: OFF vs burst median   B: OFF vs OFF neighbours   C: pair response vs median\n\
-         All three are per-pair worst-case, so all stay conjunctive as B9 requires.\n"
+         All three are per-pair worst-case, so all stay conjunctive: a pulsed IR source\n\
+         leaves some pairs clean.\n"
     );
 }
 
@@ -427,8 +428,8 @@ fn falloff_is_computed_on_a_difference_so_ambient_should_cancel() {
                 "\nNO VERDICT. Against worst live {worst_live:.4}, that range straddles the live band\n\
                  rather than sitting below it. Choosing the ROI by 'strongest weakest cell' — the\n\
                  obvious on-object rule — selects the most uniformly lit patch and lands near the\n\
-                 bottom of the range. That is how this test reported a 2.45x separation on\n\
-                 2026-08-09 which was entirely placement bias.\n\n\
+                 bottom of the range. That is how this test once reported a 2.45x separation\n\
+                 which was entirely placement bias.\n\n\
                  The real pipeline never chooses. YuNet returns the box, and against a genuine print\n\
                  attack it returns the box *on the printed face*. So the deciding number is falloff\n\
                  over a DETECTED box on a printed face — which needs a printed face. A blank page\n\

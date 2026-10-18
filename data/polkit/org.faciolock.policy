@@ -4,7 +4,7 @@
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 
 <!--
-  Installed to /usr/share/polkit-1/actions/ (Phase 7).
+  Installed to /usr/share/polkit-1/actions/.
 
   One action, not one per subcommand, because pkexec gates the *program*: the annotation
   below names an executable, and pkexec re-executes it with the arguments it was given.
@@ -13,7 +13,7 @@
   boundary without being one.
 
   auth_admin, deliberately not auth_admin_keep. `_keep` caches the authorisation for about
-  five minutes, and the thing being authorised is `faciolockctl enroll` -- which writes a
+  five minutes, and the thing being authorised is `faciolockctl enroll` — which writes a
   face into the template store. Anyone reaching an unlocked session inside that window could
   enrol their own face without typing anything. Five minutes of convenience is not worth a
   window in which the machine can be taught a new owner, so every invocation asks.

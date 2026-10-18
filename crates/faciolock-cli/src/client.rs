@@ -49,7 +49,7 @@ fn describe(socket: &Path, e: std::io::Error) -> String {
         std::io::ErrorKind::ConnectionRefused => {
             format!("{} exists but nothing is listening — faciolockd is not running", socket.display())
         }
-        // P6-d took the socket from 0600 root:root to 0660 root:faciolock-auth, so "run as
+        // The socket went from 0600 root:root to 0660 root:faciolock-auth, so "run as
         // root" stopped being the whole answer -- and it is the wrong half to lead with for
         // anything a session runs.
         std::io::ErrorKind::PermissionDenied => format!(

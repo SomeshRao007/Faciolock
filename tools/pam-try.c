@@ -1,7 +1,7 @@
 /*
  * pam-try — run one PAM authentication and print the raw return code.
  *
- * The exit criterion for Phase 3 (wiki/09) is about what a real libpam does with
+ * The question here is what a real libpam does with
  * pam_faciolock.so, and no Rust test can answer that: the module has to be dlopen'd by
  * libpam, out of a pam.d file, with a real pam_handle_t. This is the smallest program that
  * makes that happen.
@@ -33,7 +33,7 @@ extern int pam_acct_mgmt(pam_handle_t *, int);
 extern int pam_end(pam_handle_t *, int);
 extern const char *pam_strerror(pam_handle_t *, int);
 
-/* The module never converses (wiki/03 R8). If something asks, that is itself a finding. */
+/* The module never converses. If something asks, that is itself a finding. */
 static int refuse(int n, const void **msg, void **resp, void *data)
 {
 	(void)n; (void)msg; (void)resp; (void)data;
@@ -78,7 +78,7 @@ int main(int argc, char **argv)
 	       rc, pam_strerror(pamh, rc), ms, name_of(rc));
 
 	/*
-	 * Phase 4: the account stack is how the lockout is released (wiki/03 R5, P4-b), and
+	 * The account stack is how the lockout is released, and
 	 * the property to watch is that pam_faciolock returns PAM_IGNORE here whatever the
 	 * daemon does. PAM_IGNORE is 25 and does not appear in the stack's own result, so what
 	 * this prints is the *stack's* answer -- with pam_permit alongside it in the account

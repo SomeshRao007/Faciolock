@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
-# No dependencies, and this one is load-bearing rather than aesthetic. wiki/04 requires
-# `faciolock-pam`'s dependency tree to be exactly `libc` + `faciolock-ipc`, and Phase 3
+# No dependencies, and this one is load-bearing rather than aesthetic. The rule is that
+# `faciolock-pam`'s dependency tree is exactly `libc` + `faciolock-ipc`, and a test
 # asserts that in CI. Anything added here lands inside every process that authenticates a
 # user, `sudo` included.
 [dependencies]

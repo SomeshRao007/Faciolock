@@ -7,7 +7,7 @@ publish.workspace = true
 [lib]
 name = "pam_faciolock"
 # `cdylib` is the module PAM `dlopen`s. `rlib` exists only so `cargo test` can link the
-# crate; it produces no shipped artifact. wiki/04's rule is about the *dependency* tree,
+# crate; it produces no shipped artifact. The rule below is about the *dependency* tree,
 # not the crate types.
 crate-type = ["cdylib", "rlib"]
 
