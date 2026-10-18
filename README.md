@@ -30,16 +30,6 @@ screen, `sudo`, `su` and polkit — and a password always remains available as a
 **Face authentication is a convenience factor, not a password replacement.** Faciolock
 is designed to sit alongside your password, never to replace it.
 
-Known limitations:
-
-- A flat **printed photograph is not reliably rejected** by the liveness checks.
-- A purpose-built 3D mask under active near-infrared illumination is not reliably
-  rejected — the same bar Windows Hello sits at.
-- The false-accept rate has not been measured on a multi-subject dataset. The cosine
-  threshold is OpenCV's published 0.363.
-- In bright daylight, authentication requires a usable emitter signal; weak, irregular
-  or saturated captures are refused and fall through to the password.
-
 If you need a second factor that resists a motivated attacker, use a hardware token.
 
 ## How it works
