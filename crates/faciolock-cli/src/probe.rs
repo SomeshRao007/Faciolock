@@ -72,13 +72,13 @@ pub fn config_text(device: &Path, tier: &str) -> String {
          #\n\
          # The device is a by-path symlink, not /dev/videoN: the numbering renumbers across\n\
          # boots, and by-id collides between the RGB and IR interfaces of the same USB device\n\
-         # on at least one machine (wiki/10 Probe 4). The daemon re-verifies the format and\n\
+         # on at least one machine. The daemon re-verifies the format and\n\
          # geometry on open regardless of what this says.\n\
          device = \"{}\"\n\
          \n\
          # Which illumination this camera provides, and therefore which liveness checks apply.\n\
          # Observed once, here. Never inferred per authentication: a burst that does not\n\
-         # conform to this tier is a reject, not a downgrade (P1-e).\n\
+         # conform to this tier is a reject, not a downgrade.\n\
          tier = \"{tier}\"\n",
         device.display()
     )
@@ -184,7 +184,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("faciolockd.toml");
 
-        let text = config_text(Path::new("/dev/v4l/by-path/pci-0000:00:14.0-usb-0:7:1.2-video-index0"), "ir-strobe");
+        let text = config_text(Path::new("/dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.2-video-index0"), "ir-strobe");
         assert!(text.contains("tier = \"ir-strobe\""), "{text}");
         assert!(text.contains("device = \"/dev/v4l/by-path/"), "{text}");
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# enrol-try -- Phase 5's exit criterion, and the row Phases 3 and 4 both left open.
+# enrol-try -- enrol from the CLI alone, and watch a denied face move the counter.
 #
-#   "A person who has not read this wiki can enrol and use it from the CLI alone."
-#   "A denied face moves the counter."  (wiki/09 Phase 4, last row)
+#   "A person who has not read the source can enrol and use it from the CLI alone."
+#   "A denied face moves the counter."
 #
 # Needs a camera and needs YOUR FACE. That is the whole reason it exists: everything
-# reachable without one is already a `cargo test`, and both open rows in wiki/09 are open
-# because a burst of a real face is the one input a test cannot fabricate.
+# reachable without one is already a `cargo test`, and both of the above need a burst of a
+# real face, the one input a test cannot fabricate.
 #
 #   sudo ./tools/enrol-try.sh
 #
@@ -14,10 +14,9 @@
 # $TMPDIR, so a failed run leaves your real /var/lib/faciolock alone -- and on a machine where
 # Faciolock is not installed yet, there is no real one to leave alone.
 #
-# Not shipped, not a test. It exists so a human can watch it happen and write "observed" in
-# wiki/09 rather than "pending".
+# Not shipped, not a test. It exists so a human can watch it happen.
 #
-# ** If it is daylight where you are, stop and come back after dark. ** B18: ambient infrared
+# Strong ambient infrared -- direct sunlight on the lens --
 # lifts the sensor floor above what the strobe checks can work against, and every capture
 # answers Unavailable. That is the daemon being honest, not the harness being broken, and
 # this script says so when it happens rather than leaving you to guess.
@@ -115,9 +114,9 @@ if [ ! -f "$templates/$uid.tpl" ]; then
 		echo "The daemon's log says why, and it is not a fault:"
 		grep 'reason=ambient' "$run/log" | tail -3 | sed 's/^/  /'
 		echo
-		echo "That is B18. The room has more infrared in it than the strobe checks can"
-		echo "work against -- almost always daylight. Close the blinds, or come back"
-		echo "after dark, and run this again."
+		echo "The room has more infrared in it than the strobe checks can"
+		echo "work against -- usually direct sunlight. Shade the camera or close the"
+		echo "blinds, and run this again."
 		exit 3
 	fi
 	echo "Daemon log:"
@@ -155,7 +154,7 @@ check "and it counted" "1" \
 	"$(grep -cE '^<5>faciolockd: auth uid='"$uid"' verdict=Allow.*counted=1' "$run/log")"
 
 echo
-echo "PART 4 -- the row wiki/09 has had open since Phase 4:"
+echo "PART 4 -- the one no unit test can reach:"
 echo "          \"a denied face moves the counter\""
 echo
 echo "  Point the camera at something that is NOT your face -- turn the laptop away,"
@@ -195,8 +194,7 @@ echo
 echo "NOT PROVEN HERE, and it must not be written up as observed:"
 cat <<'NOTE'
   that `sudo` authenticates by face. That needs an edit to /etc/pam.d/sudo, which is a
-  separate decision with its own recovery story, and wiki/09 Phase 3 keeps that row open
-  deliberately until someone takes it.
+  separate decision with its own recovery story.
 NOTE
 
 echo

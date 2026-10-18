@@ -23,7 +23,7 @@ Two artifacts, deliberately separated by whether they contain biometrics:
 Line-oriented rather than JSON so the Rust side parses them with `split_whitespace` and
 the crate stays on exactly one dependency.
 
-Usage (needs the venv from wiki/12, not the system python):
+Usage (needs a venv with opencv-python and numpy, not the system python):
     <venv>/bin/python tools/gen-goldens.py
 """
 

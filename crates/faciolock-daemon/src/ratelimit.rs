@@ -44,7 +44,7 @@ impl Decision {
     }
 }
 
-// ponytail: whole-file rewrite, see wiki/14
+// ponytail: whole-file rewrite
 pub struct Limiter {
     path: PathBuf,
     entries: HashMap<u32, Entry>,

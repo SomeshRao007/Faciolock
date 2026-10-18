@@ -200,7 +200,7 @@ fn burst_cost_from_a_warm_session() {
         pct(&sensor, 0.95)
     );
     println!("discarded frames {discarded}, dropped {dropped}");
-    println!("wiki/06 budgets 130 ms for this stage.\n");
+    println!("the budget for this stage is 130 ms.\n");
 
     assert_eq!(dropped, 0, "sensor produced frames the burst never saw");
 }

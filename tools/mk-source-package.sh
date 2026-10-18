@@ -28,7 +28,7 @@ command -v dpkg-buildpackage >/dev/null || {
 # Before anything is assembled, because this is the one class of defect a build cannot
 # find: the KCM's QML imports are inside a Qt resource, dh_shlibdeps reads ELF, and a
 # missing declaration ships a package that installs fine and renders a blank page on any
-# machine that is not this one. wiki/11 B33.
+# machine that is not this one.
 "$root/tools/check-qml-deps.sh"
 echo
 

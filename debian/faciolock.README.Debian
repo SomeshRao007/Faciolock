@@ -1,10 +1,10 @@
 faciolock for Debian and Ubuntu
 ===============================
 
-Installing this package does not enable face authentication. Nothing
-authenticates by face until you install libpam-faciolock and run
-pam-auth-update, and that is a separate, deliberate step with its own recovery
-path -- see /usr/share/doc/libpam-faciolock/README.Debian.
+This package alone does not authenticate anyone. libpam-faciolock registers a
+pam-auth-update profile that is enabled on install; until a face is enrolled,
+the PAM stack falls through to the password prompt. Recovery steps are in
+/usr/share/doc/libpam-faciolock/README.Debian.
 
 Setting it up
 -------------
@@ -63,8 +63,6 @@ Two limitations at this version are measured rather than suspected:
     published bar for this project is the same one Windows Hello sits at: a
     purpose-built artefact defeats it. If you need a second factor that resists
     a motivated attacker, use a hardware token.
-
-Both are tracked in the bug log shipped with this package.
 
 Removing it
 -----------

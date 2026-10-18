@@ -9,7 +9,7 @@ name = "faciolockctl"
 path = "src/main.rs"
 
 # `faciolock-pam` is deliberately absent, and so is `faciolock-daemon`. The CLI is a fourth
-# consumer of the socket, not a way into either of them: the rule wiki/04 exists to enforce is
+# consumer of the socket, not a way into either of them: the rule that matters is
 # that `cargo tree -p faciolock-pam` stays at `libc` + `faciolock-ipc`, and the cheapest way
 # to keep that true is for nothing to grow a path between the two binaries.
 #

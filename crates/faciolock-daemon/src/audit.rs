@@ -1,4 +1,4 @@
-// ponytail: plain text, not _FIELDS, see wiki/14
+// ponytail: plain text, not _FIELDS
 
 use faciolock_vision::{Outcome, Verdict};
 

@@ -1,8 +1,7 @@
-# The process that touches attacker-controlled pixels (wiki/03 R7).
+# The process that touches attacker-controlled pixels.
 #
 # Everything below the [Service] header past ExecStart is there to make that sentence
-# survivable. Target is `systemd-analyze security faciolock.service` <= 2.0; the measured
-# score and what each refusal costs are in wiki/03 R7.
+# survivable. Target is `systemd-analyze security faciolock.service` <= 2.0.
 #
 # Three settings are deliberately NOT here, and each one would score better than it deserves:
 #
@@ -17,7 +16,7 @@
 
 [Unit]
 Description=Faciolock face authentication daemon
-Documentation=file:///usr/share/doc/faciolock/04-architecture.md
+Documentation=https://github.com/SomeshRao007/Faciolock
 Requires=faciolock.socket
 After=faciolock.socket
 
@@ -28,11 +27,11 @@ ExecStart=/usr/libexec/faciolock/faciolockd
 Restart=no
 
 # --- identity -------------------------------------------------------------------------
-# Nothing in this process is root. wiki/04's privilege split is that the PAM module holds a
+# Nothing in this process is root. The privilege split is that the PAM module holds a
 # socket and this holds the camera, the models and the store.
 User=faciolock
 Group=faciolock
-# /dev/video2 is root:video 0660. This is the one privilege the daemon has that a plain
+# /dev/video* is root:video 0660. This is the one privilege the daemon has that a plain
 # unprivileged process does not.
 SupplementaryGroups=video
 CapabilityBoundingSet=
@@ -43,7 +42,7 @@ RemoveIPC=yes
 
 # --- filesystem -----------------------------------------------------------------------
 # /var/lib/faciolock, created 0700 and owned by this user on first start. It holds the
-# encrypted templates, their key and the failure budget (wiki/04 data layout).
+# encrypted templates, their key and the failure budget.
 StateDirectory=faciolock
 StateDirectoryMode=0700
 UMask=0077
@@ -55,8 +54,8 @@ ProcSubset=pid
 
 # --- devices --------------------------------------------------------------------------
 # Everything closed, then the one class of node this daemon exists to read. `char-video4linux`
-# rather than a /dev/video* glob: the glob is a path and the numbering renumbers across boots
-# (wiki/10 Probe 4), while the device class does not.
+# rather than a /dev/video* glob: the glob is a path and the numbering renumbers across boots,
+# while the device class does not.
 DevicePolicy=closed
 DeviceAllow=char-video4linux rw
 
@@ -79,8 +78,8 @@ RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes
 # `tract` is a pure-Rust interpreter with no JIT and the models are mmap'd read-only, so this
-# costs nothing here. It would have been a live question under `ort` — wiki/03 R7 flagged it
-# as an input to Q2, and choosing tract settled it.
+# costs nothing here. It would have been a live question under `ort`, and choosing tract as
+# the inference runtime settled it.
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service

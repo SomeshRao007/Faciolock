@@ -1,11 +1,11 @@
 # The socket exists at boot; the daemon does not.
 #
-# This is wiki/04's "zero RSS when idle" in three lines: systemd owns the listening inode,
+# This is "zero RSS when idle" in three lines: systemd owns the listening inode,
 # the first connect() starts faciolockd, and after `idle_timeout_secs` with nothing
 # connecting the daemon exits and leaves this behind. Nothing is lost by the exit — the
 # template store, the failure budget and the audit log are all on disk.
 #
-# `ListenSequentialPacket`, not `ListenStream`. wiki/04 specifies SOCK_SEQPACKET so message
+# `ListenSequentialPacket`, not `ListenStream`. The protocol is SOCK_SEQPACKET so message
 # boundaries come from the kernel and faciolock-ipc has no framing to get wrong. Getting this
 # line wrong hands the daemon a working SOCK_STREAM listener that mis-parses every request,
 # so `serve::conforms` refuses to start on it rather than letting it be found at a lock
@@ -13,12 +13,12 @@
 
 [Unit]
 Description=Faciolock face authentication socket
-Documentation=file:///usr/share/doc/faciolock/04-architecture.md
+Documentation=https://github.com/SomeshRao007/Faciolock
 
 [Socket]
 ListenSequentialPacket=/run/faciolock.sock
 SocketUser=root
-# wiki/03 R2 / P6-d. This was root:root 0600 until Q10 measured the KDE greeter: it is not
+# This was root:root 0600 until the KDE greeter was measured: it is not
 # setuid, it links libpam itself, and it runs in the user's session — so a root-only socket
 # means the lock screen can never show a face, only fall through to the password field.
 #
@@ -36,7 +36,7 @@ Accept=no
 # nothing listening on it. It clears at reboot and systemd rebinds over it, so
 # nothing breaks; it is still a file the uninstall did not take with it.
 RemoveOnStop=yes
-# FlushPending= is deliberately absent (P6-f). A daemon that cannot start never drains the
+# FlushPending= is deliberately absent. A daemon that cannot start never drains the
 # connection that activated it, so systemd reactivates into the same failure until
 # StartLimitBurst fails this unit. FlushPending=yes stops that — and also drops the honest
 # connection that races an ordinary idle-exit, which today the next activation serves. The

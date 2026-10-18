@@ -1,9 +1,9 @@
 /*
  * sock-try -- send one request to faciolockd and print the verdict byte.
  *
- * The daemon's socket is SO_PEERCRED-gated to root (wiki/03 R2), so every interesting path
+ * The daemon's socket is SO_PEERCRED-gated to root, so every interesting path
  * through it needs a root client. `pam-try` is one, but it goes through libpam and therefore
- * needs the module installed and a pam.d file. This does not: it speaks wiki/04's wire
+ * needs the module installed and a pam.d file. This does not: it speaks the daemon's wire
  * format directly, which makes it the tool for watching the daemon's own behaviour rather
  * than the module's.
  *
@@ -94,7 +94,7 @@ int main(int argc, char **argv)
 	unsigned char res[8];
 	ssize_t n = read(fd, res, sizeof res);
 	if (n == 0) {
-		/* wiki/04 defines this as PAM_AUTHINFO_UNAVAIL on the caller's side. It is also
+		/* The protocol defines this as PAM_AUTHINFO_UNAVAIL on the caller's side. It is also
 		 * what `serve::may_ask` refuses with: asking about somebody else, or asking for
 		 * clear/enroll without being root, gets no reply at all rather than a Deny. */
 		printf("no reply (EOF) -- refused, or the daemon closed on us\n");

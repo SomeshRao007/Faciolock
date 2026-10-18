@@ -1,4 +1,4 @@
-// ponytail: serial; one camera, see wiki/14
+// ponytail: serial; one camera
 
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -130,7 +130,7 @@ fn sockopt(fd: libc::c_int, name: libc::c_int) -> Result<libc::c_int, String> {
 // ponytail: capped so a hammering client cannot spin us
 const DRAIN_MAX: usize = 64;
 
-// ponytail: close, not reply — same PAM code, wiki/04
+// ponytail: close, not reply — same PAM code
 pub fn drain(listener: &UnixListener) -> usize {
     if listener.set_nonblocking(true).is_err() {
         return 0;
@@ -230,7 +230,7 @@ impl<'a> Peer<'a> {
         self.uid
     }
 
-    // ponytail: stage boundaries only, see wiki/14
+    // ponytail: stage boundaries only
     pub fn hung_up(&self) -> bool {
         let mut poll = libc::pollfd {
             fd: self.stream.as_raw_fd(),
@@ -303,7 +303,7 @@ pub fn to_wire(verdict: &faciolock_vision::Verdict) -> Verdict {
     }
 }
 
-// wiki/03 R2, second form (P6-d). The old rule was "only root may ask" and it lived at
+// The old rule was "only root may ask" and it lived at
 // connect(); it cannot stay there, because the KDE greeter that has to ask is not root.
 //
 // Root asks about anybody. Anybody else asks only about themselves, and only the two
@@ -373,7 +373,8 @@ mod tests {
 
         // The two that would make the failure budget worthless. Clear is the sharp one: a
         // session process that can reset its own counter has unlimited face attempts, and
-        // after B24 the budget is the defence rather than a backstop behind liveness.
+        // liveness does not reliably reject a printed photo, so the budget is the defence rather
+        // than a backstop behind liveness.
         assert!(!may_ask(ME, Some(ME), Op::Clear), "clearing your own budget defeats the limiter");
         assert!(!may_ask(ME, Some(ME), Op::Enroll), "a session process must not write a template");
     }
@@ -426,7 +427,7 @@ mod tests {
             )
         };
         assert_eq!(rc, 0, "getsockopt failed");
-        assert_eq!(kind, libc::SOCK_SEQPACKET, "wiki/04 specifies SOCK_SEQPACKET");
+        assert_eq!(kind, libc::SOCK_SEQPACKET, "the protocol requires SOCK_SEQPACKET");
 
         let mode = std::fs::metadata(&path).expect("socket exists").permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "the socket must never be group- or world-reachable");

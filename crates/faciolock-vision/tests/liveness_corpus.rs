@@ -83,7 +83,7 @@ fn corpus_liveness_report() {
     }
 
     eprintln!(
-        "\ncorpus liveness, ROI = YuNet box (B7 closed)\n\
+        "\ncorpus liveness, ROI = YuNet box, not a centre crop\n\
          {:<26} {:>6} {:>6} {:>11} {:>10} {:>9} {:>9}  verdict",
         "capture", "pairs", "face", "dark(worst)", "D(worst)", "falloff", "motion"
     );
@@ -227,7 +227,7 @@ fn class_separation_report() {
         eprintln!(
             "\n  No spoof_* captures. The falloff and response checks therefore have no\n\
              negative class at all, which is why both are limited: falloff enforces only a\n\
-             degenerate-flatness floor and response is advisory. See wiki/09."
+             degenerate-flatness floor and response is advisory."
         );
     } else {
         eprintln!("\n  spoof captures present: {}", have.join(", "));

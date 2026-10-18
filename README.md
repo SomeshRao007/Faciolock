@@ -1,78 +1,51 @@
 # Faciolock
 
-IR face authentication for Linux, via PAM. Written in Rust, built to behave like a
-platform component rather than an add-on.
+Infrared face authentication for Linux, via PAM. Written in Rust and built to behave like
+a platform component: a socket-activated system daemon, a minimal PAM module, and native
+KDE Plasma integration.
 
-> [!WARNING]
-> **Alpha. It unlocks a screen, and it has been run on exactly one laptop.**
->
-> The full stack works end to end — enrolment, `sudo`, SDDM and the KDE lock screen all
-> authenticate by face on the reference machine. Recorded daylight captures now enroll
-> and verify with production defaults; the updated release still needs a daylight test
-> on hardware. A **printed photograph is not reliably rejected**.
-> See [Status](#status) and [Hardware](wiki/15-hardware-compatibility.md).
+Faciolock works everywhere a password works — login, the SDDM greeter, the KDE lock
+screen, `sudo`, `su` and polkit — and a password always remains available as a fallback.
 
----
+## Features
 
-## Security ceiling — read this first
+- **IR liveness without a neural network.** Liveness is computed from the camera's own
+  emitter-lit and emitter-dark frames. No presentation-attack model, no extra weights,
+  and no writes to the camera device.
+- **Pure-Rust inference.** Face detection (YuNet) and recognition (SFace) run on
+  [`tract`](https://github.com/sonos/tract). No OpenCV, no `onnxruntime`, no Python at
+  runtime; the binaries link only `libc`, `libm` and `libgcc_s`.
+- **Privilege separation.** An unprivileged, sandboxed daemon owns the camera and the
+  models. The PAM module owns nothing but a Unix socket, and its dependency tree is
+  exactly `libc` and the IPC crate — enforced by a test.
+- **Zero memory when idle.** The daemon is socket-activated and exits when idle.
+- **Encrypted template store**, a persistent per-user failure budget, and an audit log.
+- **Desktop integration.** A KDE System Settings page, and SDDM and lock-screen themes
+  that start a face scan as soon as the greeter appears.
+- **Safe by construction.** Every failure mode — daemon down, not enrolled,
+  rate-limited, refused — falls through to the password prompt.
 
-**Face authentication is a convenience factor, not a password replacement.** Faciolock is
-designed to sit alongside your password, never to replace it, and a password must always
-remain reachable. This is stated here as plainly as [Howdy](https://github.com/boltgolt/howdy)
-states it, for the same reasons.
+## Security notice
 
-What that means concretely:
+**Face authentication is a convenience factor, not a password replacement.** Faciolock
+is designed to sit alongside your password, never to replace it.
 
-- A sufficiently determined attacker with a purpose-built artefact — an actively
-  NIR-illuminated 3D mask — is **not reliably rejected**. This is also the bar Windows
-  Hello sits at.
-- **A flat printed photograph is not reliably rejected either, and that is worse than the
-  line above.** Measured, not assumed: a magazine print read *above* the worst live face
-  on the falloff statistic the liveness check uses, so there is currently **no enforced
-  check that rejects a print**. A print costs a printer, not a workshop.
-  [B24](wiki/11-bug-log.md#b24).
-- **Daylight requires a usable emitter signal.** Every pair must have OFF/ON ≤ 0.9
-  and ON−OFF ≥ 5 intensity levels, with a clear alternating pattern. Weak, irregular or
-  saturated captures still refuse face authentication and fall through to a password.
-  Recorded daylight passes; hardware availability with these defaults remains unverified.
-- Every claim below distinguishes what has been **measured** from what has been
-  **assumed**. Some checks that sound obvious have already been refuted by measurement
-  (see [B17](wiki/11-bug-log.md)); assume nothing on this page is true because it is
-  plausible.
-- The PAM profile is enabled on a fresh install. Until a face is enrolled, authentication
-  falls through to the password prompt.
+Known limitations:
+
+- A flat **printed photograph is not reliably rejected** by the liveness checks.
+- A purpose-built 3D mask under active near-infrared illumination is not reliably
+  rejected — the same bar Windows Hello sits at.
+- The false-accept rate has not been measured on a multi-subject dataset. The cosine
+  threshold is OpenCV's published 0.363.
+- In bright daylight, authentication requires a usable emitter signal; weak, irregular
+  or saturated captures are refused and fall through to the password.
 
 If you need a second factor that resists a motivated attacker, use a hardware token.
-
----
-
-## Why this exists
-
-Kubuntu and Debian ship no IR face authentication. `fprintd` covers fingerprints and is a
-first-class citizen — D-Bus daemon, PAM module, desktop settings integration. The
-equivalent for the IR camera that ships on most business laptops does not exist in the
-archive. The only real option is Howdy: a third-party PPA/AUR install, Python-based, whose
-own author warns against using it as a sole authentication factor.
-
-Faciolock aims at the thing that is missing: an IR face authentication stack that a distro
-could actually ship.
-
-| Goal | Measured as |
-|---|---|
-| Works everywhere a password works | login, greeter, screen locker, `sudo`, `su`, polkit |
-| Fast | p95 auth ≤ 400 ms, PAM entry to verdict |
-| Light | 0 bytes resident when idle |
-| Accurate | FRR < 3% at FAR < 1e-4, IR mode |
-| Secure | replay defeated by design, not by a heuristic |
-| Shippable | 100% DFSG-compatible licensing, models included |
-
-That last row is a hard constraint, not an aspiration, and it has already cost two model
-choices — InsightFace and EdgeFace both ship permissive *code* with non-commercial
-*weights*. See [B10](wiki/11-bug-log.md).
-
----
+See [`SECURITY.md`](SECURITY.md) for the full policy.
 
 ## How it works
+
+### Pipeline
 
 ```
 V4L2 ─→ cheap liveness ─→ detect ─→ ROI liveness ─→ align ─→ embed ─→ match ─→ verdict
@@ -83,248 +56,237 @@ frames  dark-frame,       YuNet     falloff,        112×112   SFace     cosine
 
 **Nothing is embedded or matched until liveness has passed.**
 
-The differentiating idea is that liveness is **arithmetic, not a neural network**. The IR
-camera on the reference machine already alternates emitter-lit and emitter-dark frames in
-hardware — 15 ON/OFF pairs per second, with no input from us. Differencing those frames
-gives a depth and reflectance signal for the cost of a few `f32` reductions: no PAD model,
-no extra weights, no licence question, and **no writes to the camera device**.
+IR cameras built for Windows Hello alternate emitter-lit and emitter-dark frames in
+hardware, roughly 15 ON/OFF pairs per second. Differencing those pairs gives a depth and
+reflectance signal for the cost of a few `f32` reductions. Every pair must show real
+emitter modulation (OFF/ON ≤ 0.9 and ON−OFF ≥ 5 intensity levels) in a clear alternating
+pattern.
 
-Two aggregation rules run in opposite directions over the same burst, and they must never
-be unified:
+Two aggregation rules run over the same burst, deliberately in opposite directions:
 
 | | Rule | Why |
 |---|---|---|
 | **Liveness** | **every** pair must pass | one contaminated frame is evidence of an attack, and evidence does not average out |
 | **Matching** | k of n must agree | one bad frame is a blink or a blur, and flukes *should* average out |
 
-Getting that wrong is not theoretical. Under the former darkness-only threshold, a
-pulsed IR source passed a per-pair dark-frame check on 16.7% of pairs, which at the capture
-budget was a **1-in-36 authentication bypass**. That historical rejection margin does
-not apply to the daylight defaults — [B9](wiki/11-bug-log.md).
+### Architecture
 
-Architecture is copied in spirit from `fprintd`, which is the design Debian already ships
-and trusts: an unprivileged, socket-activated daemon owns the camera and the ML, and a
-small PAM module owns nothing but a Unix socket. The PAM module is loaded into `sudo` and
-the screen locker, both running as root, so it is required to have a dependency tree of
-exactly `libc` and the IPC crate — auditable in a `cargo tree` diff on every change.
+```
+  sudo / su / login / sddm / kscreenlocker / polkit
+                       │  PAM
+                       ▼
+             pam_faciolock.so            libc + faciolock-ipc only
+                       │  SOCK_SEQPACKET, /run/faciolock.sock
+                       ▼                 (0660 root:faciolock-auth)
+                 faciolockd              socket-activated, sandboxed, unprivileged
+           ┌───────────┼───────────┐
+           ▼           ▼           ▼
+       IR camera    YuNet +    encrypted templates,
+        (V4L2)       SFace     failure budget, audit log
+```
 
-Full design: [`wiki/`](wiki/).
+The design follows `fprintd`: the daemon owns the camera, the models and the templates;
+the PAM module, which is loaded into processes running as root, asks one question over a
+socket and returns.
 
----
+## Requirements
 
-## Status
+- **An IR camera** of the kind shipped for Windows Hello. An RGB webcam will not work.
+- A Debian- or Ubuntu-based distribution with systemd and PAM.
+- KDE Plasma 6 for the optional settings page and greeter integration.
 
-| Phase | Scope | State |
-|---|---|---|
-| 0 | Hardware probe, corpus, runtime spikes | done, one item deferred |
-| 1 | `faciolock-vision` — frames in, verdict out | done |
-| 2 | `v4l` capture, `faciolockd` skeleton | done |
-| 3 | PAM module + IPC | done |
-| 4 | Template store, encryption, rate limiting | done — TPM sealing deferred to post-v1 |
-| 5 | `faciolockctl` enrolment CLI | done |
-| **6** | **systemd integration, sandboxing, all PAM services** | **done — the KDE lock screen unlocks by face** |
-| 7 | Packaging, PPA release | in progress |
+To check for an IR camera, install `v4l-utils` and run:
 
-### What is verified
+```bash
+for d in /dev/video*; do echo "=== $d"; v4l2-ctl -d "$d" --info --list-formats 2>&1 | grep -E "Card type|\[[0-9]\]"; done
+```
 
-Measured on the reference machine against recorded captures, not asserted:
+Look for a device whose card type mentions **IR** and whose only pixel format is
+**`GREY`**.
 
-| Claim | Evidence |
+## Installation
+
+Faciolock is installed as Debian packages built from this repository.
+
+| Package | Contents |
 |---|---|
-| Hardware self-strobes, 15 ON/OFF pairs/sec | 3 independent runs |
-| Emitter modulation and response are required over ambient light | OFF/ON ≤ 0.9 and ON−OFF ≥ 5 enforced on every pair; synthetic weak-response cases reject |
-| One pair failing enforced liveness sinks a burst | synthetic regression; no majority vote |
-| YuNet detects faces in **near-infrared** | live recordings pass, including daylight; the ceramic mug rejects before identity matching |
-| Recorded daylight enrollment and verification work with production defaults | dark and daylight templates, full captures and six-frame daemon bursts; one known low-SNR window remains unusable |
-| SFace discriminates on **near-infrared** | genuine cross-capture cosine 0.60–0.90 against a 0.363 threshold |
-| Detection and alignment match OpenCV | box IoU 0.998–0.999; aligned chip mean diff 0.000, max 1 |
-| A phone screen showing a photo is rejected | verdict `NoFace` — though see below |
-| **The KDE lock screen unlocks by face** | 2026-08-31, twice, on a trackpad touch with no keystroke |
-| **`sudo` authenticates by face** | 2026-08-31, `sudo -K` then `sudo true`, no password prompt |
-| **A login through a display manager** | SDDM, 2026-08-31 — though the greeter decides *when* the face check runs, not us |
-| **Zero bytes resident when idle** | socket-activated, idle-exits, reactivates on the same inode under real systemd |
-| **The sandbox scores 0.6 and still does the work** | `systemd-analyze security`, and the same run opened the camera and loaded both models under it |
-| **A refused or unjudgeable face still lets you in with a password** | observed through `pam-auth-update`, and nothing that never saw a face moved the failure budget |
-| **The PAM module's dependency tree is `libc` + the IPC crate** | `cargo tree`, asserted by a test on every change |
+| `faciolock` | the daemon `faciolockd`, the `faciolockctl` CLI, systemd units, polkit policy |
+| `libpam-faciolock` | the PAM module and its `pam-auth-update` profile |
+| `faciolock-models` | the YuNet and SFace ONNX models |
+| `plasma-faciolock-kcm` | *optional* — the KDE System Settings page |
+| `plasma-faciolock-greeters` | *optional* — automatic face scanning in SDDM and the lock screen |
 
-### What is not
+### 1. Install the build dependencies
 
-Stated as plainly as the verified list, because a security claim without evidence is worth
-nothing:
+```bash
+sudo apt install git curl rsync build-essential debhelper devscripts lintian cargo rustc libpam0g-dev cmake extra-cmake-modules libkf6kcmutils-dev libkf6coreaddons-dev qt6-declarative-dev
+```
 
-- **Printed photos are tested, and they win.** The deferral was closed on 2026-08-19 and the
-  answer was the bad one: a magazine print measured CV 0.2733 against a worst live face of
-  0.2661, so the falloff check reads the print as *more* alive than a person. No liveness
-  check currently rejects a print. [B24](wiki/11-bug-log.md#b24).
-- **Daylight hardware availability with the updated defaults is unverified.** Offline
-  enrollment and verification pass. One of 960 measured live six-frame windows fails the
-  unchanged temporal-SNR classifier and remains explicitly unusable in the regression.
-- **Extra IR alongside a genuine enrolled face is not categorically rejected.** Two
-  recordings contain the enrolled person with an IR remote and now match. These are not
-  identity impersonations; the corpus cannot establish general spoof resistance.
-- **The response test does not do what it was designed to do.** It was meant to reject
-  screens on the grounds that an LCD emits nothing at 850 nm. A phone measured `D = 36.2`
-  against a live minimum of 48.6, not the predicted ~0, because the statistic is
-  whole-frame and the frame is mostly room. The phone was rejected — by *detection*, not by
-  this check. [B17](wiki/11-bug-log.md).
-- **FAR is unmeasurable.** The corpus has one subject. The cosine threshold is OpenCV's
-  RGB-calibrated 0.363 — paper-derived and provisional, and it does not meet this project's
-  own "measured on our own corpus" standard.
-- **Latency has two measurements and they disagree.** An end-to-end bench against the
-  release daemon and the wiki's per-stage table differ by 133 ms in a direction that is
-  arithmetically impossible, so one of them is measuring something other than its label.
-  Until the frame burst is timed inside the daemon, **neither number is quotable** and none
-  is quoted here.
-- **One machine.** Every hardware claim comes from a single ASUS Vivobook.
+Rust 1.85 or newer is required.
 
-Only motion reports as `advisory`; emitter modulation, response and falloff are enforced.
+### 2. Fetch the models
 
----
+The models are not stored in git. Download them from the OpenCV Zoo and verify them:
 
-## Installing
+```bash
+curl -L -o models/face_detection_yunet_2026may.onnx https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2026may.onnx
+```
 
-You need an **IR camera**. Check first — [`wiki/15`](wiki/15-hardware-compatibility.md)
-has the one-liner, and an RGB webcam will not do.
+```bash
+curl -L -o models/face_recognition_sface_2021dec.onnx https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx
+```
 
-Four packages: `faciolock` (daemon, CLI, units), `libpam-faciolock` (the module and its
-`pam-auth-update` profile), `faciolock-models` (the weights), and `plasma-faciolock-kcm`
-(the KDE settings panel, which is optional — everything it does, `faciolockctl` does).
-Build them from a checkout:
+```bash
+(cd models && sha256sum -c MANIFEST.sha256)
+```
+
+### 3. Build the packages
 
 ```bash
 ./tools/mk-source-package.sh --binary
 ```
 
-The PAM profile is enabled on a fresh install. It falls through to your password until
-you enrol a face. To set up the camera and enrol:
+The packages are written to `../faciolock-build/`.
+
+### 4. Install
+
+```bash
+cd ../faciolock-build && sudo apt install ./faciolock_*.deb ./libpam-faciolock_*.deb ./faciolock-models_*.deb
+```
+
+On KDE Plasma, also install the settings page and greeter integration:
+
+```bash
+cd ../faciolock-build && sudo apt install ./plasma-faciolock-kcm_*.deb ./plasma-faciolock-greeters_*.deb
+```
+
+## Setup
+
+Detect the camera and write the daemon configuration:
 
 ```bash
 sudo faciolockctl diagnose --write
 ```
+
+Enrol your face (three poses):
+
 ```bash
-sudo faciolockctl enroll $USER
-```
-```bash
-sudo faciolockctl test $USER
+sudo faciolockctl enroll
 ```
 
-`test` exercises the whole path without touching a single PAM file. For anything that
-authenticates inside your own desktop session — the lock screen above all — you also have
-to join the group the socket is gated on, and log out and back in:
+Run one authentication exactly as PAM would, without touching any PAM configuration:
+
+```bash
+sudo faciolockctl test
+```
+
+To unlock the KDE lock screen by face, add your account to the `faciolock-auth` group,
+then log out and back in:
 
 ```bash
 sudo gpasswd -a $USER faciolock-auth
 ```
 
-Switch face authentication off or back on from the System Settings page, or run
-`sudo faciolockctl disable` and `sudo faciolockctl enable`.
-Every failure mode — daemon down, not enrolled, rate-limited, refused — falls through to
-your password by construction, and the worst a broken PAM file can do is make one service
-refuse to authenticate. It cannot make a machine unbootable.
+The PAM profile is enabled on install. Until a face is enrolled, authentication falls
+through to the password prompt.
 
----
+## Usage
 
-## Building
+| Command | Description |
+|---|---|
+| `faciolockctl enroll [USER]` | guided enrolment, three poses |
+| `faciolockctl list` | list enrolled users |
+| `faciolockctl remove USER [--yes]` | delete an enrolment |
+| `faciolockctl test [USER]` | one authentication, exactly as PAM would request it |
+| `faciolockctl status [USER]` | whether a user is enrolled; needs no root and no camera |
+| `faciolockctl enable` / `disable` | turn face authentication on or off system-wide |
+| `faciolockctl bench [-n N] [USER]` | N authentications, reporting p50/p95/p99 latency |
+| `faciolockctl diagnose [--write]` | detect the camera and generate the daemon configuration |
 
-Requires a Rust toolchain (1.93+) and nothing else — the inference runtime is
-[`tract`](https://github.com/sonos/tract), pure Rust, so the built binary links only
-`libc`, `libm` and `libgcc_s`. There is no `onnxruntime`, no OpenCV and no Python in the
-runtime dependency chain.
+`USER` defaults to `$SUDO_USER`. `status` and `diagnose` run as your own user; the other
+commands require root. The daemon configuration lives in `/etc/faciolock/faciolockd.toml`.
+
+On KDE Plasma, the same actions are available under **System Settings → Face Unlock**.
+
+## Uninstall
 
 ```bash
-cargo test -p faciolock-vision
+sudo faciolockctl remove $USER
 ```
-
-Tests that need neither the ONNX models nor the recorded captures always run; those that do
-need them print a visible `SKIPPED — DEGRADED RUN` banner rather than passing quietly. Set
-`FACIOLOCK_CORPUS_REQUIRED=1` to make absence a hard failure.
 
 ```bash
-cargo test --release -p faciolock-vision -- --nocapture
+sudo apt purge plasma-faciolock-greeters plasma-faciolock-kcm libpam-faciolock faciolock faciolock-models
 ```
 
-Reports the measured numbers: per-stage latency, landmark convergence across detector input
-sizes, cross-capture similarity, and class separation for each liveness metric.
+If a PAM change ever locks you out of a service, a root shell (or the recovery entry in
+the boot menu) can run `faciolockctl disable`. Full recovery notes ship in
+`/usr/share/doc/libpam-faciolock/README.Debian`.
 
-### Models
+## Development
 
-Not in version control — they are large upstream binaries. Fetch from OpenCV Zoo via
-`media.githubusercontent.com` (the plain `raw.` URL returns a 131-byte LFS pointer):
+Build and test the workspace:
 
-| Model | Licence | Purpose |
-|---|---|---|
-| `face_detection_yunet_2026may.onnx` | MIT | detection + 5 landmarks, ~230 KB |
-| `face_recognition_sface_2021dec.onnx` | Apache-2.0 | 128-d embedding, ~37 MB |
+```bash
+cargo build --workspace --release
+```
 
-Provenance and licence status per file: [`models/README.md`](models/README.md).
+```bash
+cargo test --workspace
+```
 
-### Regenerating golden references
+Tests that need the ONNX models or recorded IR captures print a visible
+`SKIPPED — DEGRADED RUN` banner when those files are absent, rather than passing
+silently. Set `FACIOLOCK_CORPUS_REQUIRED=1` to make their absence a hard failure.
 
-Detection and alignment are pinned against OpenCV, so that a bug present from the first
-commit cannot be frozen in as correct. This found a real defect —
-[B16](wiki/11-bug-log.md), a half-pixel sampling offset invisible to four self-consistent
-tests. Needs a throwaway venv, never the runtime:
+Detection and alignment are pinned against OpenCV reference outputs. To regenerate the
+golden files, use a throwaway virtual environment — never the runtime:
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install opencv-python-headless numpy
 ```
+
 ```bash
 .venv/bin/python tools/gen-goldens.py
 ```
 
----
-
-## Layout
+### Project layout
 
 ```
 crates/faciolock-vision/   the pipeline: liveness, detection, alignment, embedding, matching
 crates/faciolock-camera/   V4L2 capture
-crates/faciolock-daemon/   faciolockd: the socket, the store, the policy, the audit log
-crates/faciolock-pam/      pam_faciolock.so -- libc + the IPC crate, and nothing else
-crates/faciolock-ipc/      the wire protocol both ends share
+crates/faciolock-daemon/   faciolockd: the socket, the template store, the policy, the audit log
+crates/faciolock-pam/      pam_faciolock.so — libc + the IPC crate, nothing else
+crates/faciolock-ipc/      the wire protocol shared by both ends
 crates/faciolock-cli/      faciolockctl: enrol, diagnose, test, bench
-data/                      systemd units, sysusers, polkit, the pam-configs profile
-debian/                    the four binary packages
-kcm/                       the KDE settings panel (C++/QML, CMake, not in the workspace)
-corpus/                    recorded IR captures (.gray gitignored, sidecars committed)
-models/                    vendored ONNX + per-file licence status
-spikes/                    Phase 0 throwaway measurement tools
-fuzz/                      fuzz targets, excluded from the workspace on purpose
-tools/                     installer, harnesses, corpus recorder, golden generator
-wiki/                      design, threat model, budgets, and the bug log
+data/                      systemd units, sysusers, polkit policy, pam-configs profile, greeters
+debian/                    Debian packaging
+kcm/                       the KDE settings page (C++/QML, CMake)
+models/                    model manifest and per-file licence status
+fuzz/                      fuzz targets, kept out of the workspace on purpose
+spikes/                    standalone hardware and runtime measurement tools
+tests/                     greeter QML tests
+tools/                     packaging, installer, test harnesses, golden generator
 ```
-
-The [bug log](wiki/11-bug-log.md) is the most useful page in the wiki. Most entries are
-*design* bugs found by measurement rather than typos — a threshold that was defeated by a
-pulsed light source, a model whose weights were not licensed the way its repository was, a
-benchmark that measured the CPU's boost clock. They are written down so the same class gets
-caught again.
-
----
-
-## Licence
-
-**GPL-3.0-or-later** — [`LICENSE`](LICENSE).
-
-Vendored model files carry their own upstream licences (MIT and Apache-2.0) and are
-tracked separately in [`models/README.md`](models/README.md); the project licence does not
-apply to them. Every crate in the dependency tree is permissively licensed and compatible;
-the tally is in [`debian/copyright`](debian/copyright).
 
 ## Security
 
-**Do not report suspected vulnerabilities via public issues.** Email
-`cokasomeshrao@outlook.com` with `[faciolock security]` in the subject.
+Please do not report vulnerabilities through public issues. Use GitHub's
+[private vulnerability reporting](https://github.com/SomeshRao007/Faciolock/security/advisories/new)
+instead. See [`SECURITY.md`](SECURITY.md) for scope and timelines.
 
-Full policy, timelines, and the list of things that are known limitations rather than
-vulnerabilities: [`SECURITY.md`](SECURITY.md). Read the out-of-scope section before
-writing — a printed photograph defeating liveness is documented, not news.
+## License
+
+**GPL-3.0-or-later** — see [`LICENSE`](LICENSE).
+
+The model files carry their own upstream licences (MIT for YuNet, Apache-2.0 for SFace)
+and are tracked in [`models/README.md`](models/README.md). Every crate in the dependency
+tree is permissively licensed; the full tally is in [`debian/copyright`](debian/copyright).
 
 ## Acknowledgements
 
-- [Howdy](https://github.com/boltgolt/howdy) — the prior art, and honest about its own
-  limits in a way that set the standard for this project's documentation.
-- [OpenCV Zoo](https://github.com/opencv/opencv_zoo) — YuNet and SFace.
+- [Howdy](https://github.com/boltgolt/howdy) — the prior art for face authentication on
+  Linux.
+- [OpenCV Zoo](https://github.com/opencv/opencv_zoo) — the YuNet and SFace models.
 - [`fprintd`](https://gitlab.freedesktop.org/libfprint/fprintd) — the privilege-separation
-  design this copies.
+  design this follows.
 - [`tract`](https://github.com/sonos/tract) — pure-Rust ONNX inference.

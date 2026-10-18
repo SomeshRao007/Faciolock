@@ -1,19 +1,17 @@
 # Models
 
-ONNX models for the Phase 0 spikes. **Not in version control** — they are large
-binaries fetched from upstream. `wiki/04` specifies they eventually ship as a separate
-`faciolock-models` package with vendored licences and a `SHA256SUMS` verified at daemon
-startup.
+ONNX models Faciolock runs. **Not in version control** — they are large binaries fetched
+from upstream. They ship as the separate `faciolock-models` package with vendored licences
+and a SHA256 manifest (`MANIFEST.sha256`) the daemon verifies before loading any model.
 
 ## Licence status
 
-Every model here must be redistributable by Debian ([G7](../wiki/01-goals-and-scope.md)).
+Every model here must be redistributable by Debian: 100% DFSG-compatible licensing.
 Two candidates have already been ruled out for failing this, so the bar is:
 
 > A permissive LICENSE in a source repo says nothing about the weights. Check the
 > licence **where the weights are distributed**, check the **training data's** terms,
 > and check the redistributor had the right to grant it.
-> — [B10](../wiki/11-bug-log.md#b10)
 
 | File | Licence | Source | Status |
 |---|---|---|---|
@@ -42,7 +40,7 @@ also what Howdy uses, and why Howdy has no licence problem.
 
 | Model | Why |
 |---|---|
-| EdgeFace (all variants) | Code BSD-3, **weights CC BY-NC-SA 4.0**. Trained on WebFace260M (research-only). [B10](../wiki/11-bug-log.md#b10) |
+| EdgeFace (all variants) | Code BSD-3, **weights CC BY-NC-SA 4.0**. Trained on WebFace260M (research-only). |
 | InsightFace `buffalo_l` / ArcFace R100 | Code MIT, **weights non-commercial research only** |
 
 ## Fetching
@@ -59,8 +57,7 @@ A 131-byte "model" is the symptom of getting this wrong.
 
 ## Measured under `tract`
 
-Intel Core Ultra 5 225H, single-threaded. Full table in
-[08/Q2](../wiki/08-open-questions.md#q2--inference-runtime-ort-tract-or-candle).
+Intel Core Ultra 5 225H, single-threaded.
 
 | Model | Input | p50 |
 |---|---|---|
@@ -72,5 +69,4 @@ Intel Core Ultra 5 225H, single-threaded. Full table in
 
 **YuNet `2026may` requires square inputs.** 640×360 and 160×120 fail under *both*
 `tract` and `ort` — it is a limitation of the model's anchor/stride arithmetic, not of
-either runtime ([B11](../wiki/11-bug-log.md#b11)). The 640×360 frame must be letterboxed
-into a square before detection whichever runtime is chosen.
+either runtime. The 640×360 frame is letterboxed into a square before detection.

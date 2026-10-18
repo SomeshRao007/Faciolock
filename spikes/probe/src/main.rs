@@ -317,7 +317,7 @@ impl Capture {
                 "\nNo ON/OFF pairs found: the *ratio* test above did not see a strobe, so\n\
                  nothing was split into phases. Read the difference-domain block instead --\n\
                  a high SNR with sign regularity near 1.0 means the emitter is alternating\n\
-                 perfectly well and only the ratio statistic failed to notice. wiki/11 B18."
+                 perfectly well and only the ratio statistic failed to notice."
             );
             return s;
         }
@@ -355,7 +355,7 @@ impl Capture {
         let _ = writeln!(
             s,
             "\nNo verdict is emitted by design. These are the inputs to a threshold,\n\
-             and the threshold needs a spoof sample to sit against. See wiki/09."
+             and the threshold needs a spoof sample to sit against."
         );
         s
     }

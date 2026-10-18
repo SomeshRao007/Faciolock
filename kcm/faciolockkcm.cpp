@@ -10,7 +10,7 @@
 namespace
 {
 // ponytail: the panel shells out to faciolockctl rather than speaking the socket protocol
-// itself. P5-a says one IPC surface, and the enrolment loop already exists in one place.
+// itself. One IPC surface, and the enrolment loop already exists in one place.
 // Write a Qt client only if the panel ever needs something the CLI cannot say.
 //
 // Absolute, because polkit's exec.path annotation names this exact path. A bare name would

@@ -2,10 +2,10 @@
 """Ambient floor and strobe amplitude of a Y800 capture.
 
 Reports the same statistic the pipeline gates on, so numbers here are directly
-comparable to wiki/11 B18's table:
+comparable to what the daemon computes:
 
     ambient floor = min over frames of the frame mean      (Burst::from_frames)
-    phase         = each frame vs its immediate neighbours (frame::classify, post-B18)
+    phase         = each frame vs its immediate neighbours (frame::classify)
 
 Usage:  floor.py corpus/live_room_lit_*.gray      # analyse a recording
         floor.py --live 60                        # capture from the IR camera and analyse
@@ -22,9 +22,9 @@ import tempfile
 W, H = 640, 360
 FRAME = W * H
 
-# Frames discarded while the AGC converges -- the tests' AGC_SETTLE, wiki/10 Probe 3.
+# Frames discarded while the AGC converges -- the tests' AGC_SETTLE.
 # Validated: with this skip, live_room_lit reads 13.909 and attack_floodlight_room
-# 14.052, matching B18's matched-pair table to three decimals. Without it they read
+# 14.052, matching the pipeline's own floors to three decimals. Without it they read
 # 3.4 and 4.6, because the first frames are captured mid-ramp.
 AGC_SETTLE = 5
 
@@ -38,7 +38,7 @@ def frame_means(path):
 
 
 def classify(means):
-    """Phase by comparison with immediate neighbours -- frame::classify after B18.
+    """Phase by comparison with immediate neighbours -- frame::classify.
 
     A global split of the range fails when the series drifts more than the emitter's
     amplitude, which is exactly what daylight does.
@@ -83,7 +83,7 @@ def capture(frames, device="/dev/video2"):
     subprocess.run(
         # -fps_mode passthrough is load-bearing: without it ffmpeg rate-converts to a
         # constant 30 fps and duplicates frames, turning ON,off,ON,off into ON,ON,off,off.
-        # wiki/11 B5, and tools/record.sh carries the same flag for the same reason.
+        # tools/record.sh carries the same flag for the same reason.
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2",
          "-input_format", "gray", "-video_size", f"{W}x{H}", "-framerate", "30",
          "-i", device, "-frames:v", str(frames), "-fps_mode", "passthrough",

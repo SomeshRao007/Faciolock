@@ -34,7 +34,7 @@ Comment: SFace, 128-dimension embedding, ~37 MB. The OpenCV Zoo ships a
  recognition models are commonly trained on CASIA-WebFace or MS-Celeb-1M, both
  research-only. This must be resolved before any Debian ITP. If it does not
  clear, the fallback is dlib's dlib_face_recognition_resnet_model_v1, which is
- CC0. See models/README.md and wiki/11-bug-log.md B10.
+ CC0. See models/README.md.
 
 Files: vendor/*
 Copyright: the respective crate authors
@@ -52,8 +52,7 @@ Comment: Launchpad's build machines have no network, so the Rust dependency
  Each crate carries its own licence text in its vendored directory. This
  blanket stanza is adequate for a PPA and is NOT adequate for the Debian
  archive, which wants either per-crate librust-*-dev source packages or an
- explicit vendoring exception with a per-file audit. See wiki/07,
- "Packaging plan".
+ explicit vendoring exception with a per-file audit.
 
 License: GPL-3.0-or-later
  This program is free software: you can redistribute it and/or modify it under

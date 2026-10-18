@@ -4,12 +4,12 @@
 #   sudo ./tools/install-local.sh            install
 #   sudo ./tools/install-local.sh --remove   take it all back off
 #
-# Phase 6 needs this and Phases 1-5 did not: every harness so far ran the daemon out of
+# Every other harness runs the daemon out of
 # target/debug against a throwaway store in $TMPDIR, which is exactly right for testing the
 # code and useless for testing the *integration* -- socket activation, the sandbox, the
 # `faciolock` user, and a PAM module something other than a test harness can dlopen.
 #
-# It is deliberately not a package. wiki/07's four .deb packages are Phase 7. What this does
+# It is deliberately not a package; debian/ builds those. What this does
 # is put the same files in the same places so the unit files and the pam-configs profile are
 # exercised as written, and `--remove` puts the machine back.
 #
@@ -73,7 +73,7 @@ if [ "${1:-}" = "--remove" ]; then
 fi
 
 # A debug daemon is not worth installing: an enrolment pose cost 6.6 s in target/debug against
-# wiki/06's 85 ms for SFace, because `tract` unoptimised is a different program. Anything
+# ~85 ms for SFace optimised, because `tract` unoptimised is a different program. Anything
 # measured against a debug install is a measurement of the profile.
 [ -x "$root/target/$profile/faciolockd" ] || { echo "build it first:  cargo build --release" >&2; exit 2; }
 [ -n "$secdir" ] || { echo "no PAM security directory found under /usr/lib/*/security" >&2; exit 2; }
@@ -91,7 +91,7 @@ id faciolock >/dev/null || { echo "sysusers did not create the user" >&2; exit 1
 echo "binaries"
 # `-s` because the release profile keeps `debug = true` for profiling: an unstripped
 # faciolockd is 350 MB on disk. A package strips, so stripping here is what makes the
-# installed tree resemble the packaged one -- and wiki/06's 164 KB resident figure for the
+# installed tree resemble the packaged one -- and the measured 164 KB resident figure for the
 # PAM module is a claim about what is paged in, which stripping does not change.
 install -d -m 0755 "$libexec"
 install -s -m 0755 "$root/target/$profile/faciolockd" "$libexec/faciolockd"
@@ -106,7 +106,7 @@ echo "config directory (the file is written by diagnose, not by this script)"
 #
 # An earlier version of this script created faciolockd.toml with a comment line in it, on the
 # theory that a config file should exist after an install. That permanently broke
-# `diagnose --write`: `probe::write_config` opens with `create_new(true)` to honour P5-e --
+# `diagnose --write`: `probe::write_config` opens with `create_new(true)` --
 # never overwrite an operator's config -- so a placeholder is indistinguishable from a real
 # one and the command can only ever refuse.
 #

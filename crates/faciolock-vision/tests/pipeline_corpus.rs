@@ -432,7 +432,7 @@ fn warm_path_stage_latency() {
     }
     eprintln!("{:<34} {:>9.1}", "== crate total", rows.iter().map(|(_, m)| m).sum::<f64>());
     eprintln!(
-        "Excludes the frame burst itself (~130 ms estimated, sensor-bound, Phase 2 owns it)\n\
+        "Excludes the frame burst itself (~130 ms estimated, sensor-bound, not this crate's)\n\
          and the socket round trip."
     );
 }

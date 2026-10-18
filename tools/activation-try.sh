@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# activation-try -- Phase 6's first exit criterion.
+# activation-try -- socket activation, and nothing resident while idle.
 #
 #   "zero RSS when idle (`pidof faciolockd` empty)"
 #
@@ -20,11 +20,10 @@
 # show reactivation on the same inode. That is systemd's socket-unit behaviour and it needs
 # `tools/install-local.sh` and `systemctl`.
 #
-# The sandbox is the other one: `systemd-analyze security` needs the real unit, and that
-# measurement lives in wiki/03 R7.
+# The sandbox is the other one: `systemd-analyze security` needs the real unit.
 #
 # Parts 1-4 need no camera: every request is `status`, which answers from one file on disk and
-# never opens the device, so they run in daylight unlike enrol-try. Part 5 needs a face in
+# never opens the device, so they run with nobody at the camera. Part 5 needs a face in
 # front of the lens and says so rather than failing when there isn't one.
 
 set -u
@@ -66,7 +65,7 @@ ask() { # ask OP -> prints the verdict name
 #
 # `-x` on the process NAME rather than `-f` on the command line, because the activator's own
 # argv carries the daemon's path and a command-line match would report a running daemon for the
-# whole run. That is also how wiki/09 words the criterion: `pidof faciolockd` empty.
+# whole run.
 #
 # And then /proc/PID/cmdline for OUR config, because `-x` alone matches the **installed**
 # daemon too. Once faciolock.socket is active, anything at all can activate it mid-run -- a
@@ -144,8 +143,8 @@ echo
 first="$(ask status)"
 check "a request is answered" "NoEnrolment" "$first"
 check "the daemon is now up" "yes" "$(running)"
-# B29: activation used to warm the camera, so a status request lit the emitter for a full
-# idle window. wiki/11.
+# Activation must not warm the camera: a status request would light the emitter for a full
+# idle window.
 check "and it did not take the camera to answer it" "0" "$(video_fds)"
 check "it knows the socket was inherited" "1" \
 	"$(grep -c 'socket-activated' "$run/log")"
@@ -205,7 +204,7 @@ if [ "$pose" = "Ack" ]; then
 	sleep "$((idle + 2))"
 	check "the daemon stayed up for the rest of it" "yes" "$(running)"
 else
-	printf '  \033[33mskip\033[0m %-56s %s\n' "no pose to protect (needs a face; B18 in daylight)" "$pose"
+	printf '  \033[33mskip\033[0m %-56s %s\n' "no pose to protect (needs a face at the camera)" "$pose"
 fi
 
 echo
