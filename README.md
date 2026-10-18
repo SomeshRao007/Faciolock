@@ -41,7 +41,6 @@ Known limitations:
   or saturated captures are refused and fall through to the password.
 
 If you need a second factor that resists a motivated attacker, use a hardware token.
-See [`SECURITY.md`](SECURITY.md) for the full policy.
 
 ## How it works
 
@@ -272,7 +271,7 @@ tools/                     packaging, installer, test harnesses, golden generato
 
 Please do not report vulnerabilities through public issues. Use GitHub's
 [private vulnerability reporting](https://github.com/SomeshRao007/Faciolock/security/advisories/new)
-instead. See [`SECURITY.md`](SECURITY.md) for scope and timelines.
+instead.
 
 ## License
 
