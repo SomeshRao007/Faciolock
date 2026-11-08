@@ -1,11 +1,39 @@
-# Faciolock
+<p align="center">
+  <img src=".github/assets/faciolock-thumbnail.svg" alt="Faciolock — infrared face authentication for Linux" width="100%">
+</p>
 
-Infrared face authentication for Linux, via PAM. Written in Rust and built to behave like
-a platform component: a socket-activated system daemon, a minimal PAM module, and native
-KDE Plasma integration.
+<p align="center">
+  Written in Rust and built to behave like a platform component:<br>
+  a socket-activated system daemon, a minimal PAM module, and native KDE Plasma integration.
+</p>
+
+<p align="center">
+  <a href="Cargo.toml"><img src="https://img.shields.io/badge/rust-1.85%2B-ff3355?style=flat-square&logo=rust&logoColor=white&labelColor=151922" alt="Rust 1.85+"></a>
+  <a href="#requirements"><img src="https://img.shields.io/badge/platform-Linux-ff3355?style=flat-square&logo=linux&logoColor=white&labelColor=151922" alt="Platform: Linux"></a>
+  <a href="#requirements"><img src="https://img.shields.io/badge/desktop-KDE%20Plasma%206-ff3355?style=flat-square&logo=kde&logoColor=white&labelColor=151922" alt="Desktop: KDE Plasma 6"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/packages-Debian%20%7C%20Ubuntu-ff3355?style=flat-square&logo=debian&logoColor=white&labelColor=151922" alt="Packages: Debian and Ubuntu"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-ff3355?style=flat-square&labelColor=151922" alt="License: GPL-3.0-or-later"></a>
+</p>
+
+<p align="center">
+  <a href="#features">Features</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#requirements">Requirements</a> ·
+  <a href="#installation">Installation</a> ·
+  <a href="#setup">Setup</a> ·
+  <a href="#usage">Usage</a> ·
+  <a href="#development">Development</a>
+</p>
+
+---
 
 Faciolock works everywhere a password works — login, the SDDM greeter, the KDE lock
 screen, `sudo`, `su` and polkit — and a password always remains available as a fallback.
+
+> [!IMPORTANT]
+> **Face authentication is a convenience factor, not a password replacement.** Faciolock
+> is designed to sit alongside your password, never to replace it. If you need a second
+> factor that resists a motivated attacker, use a hardware token.
 
 ## Features
 
@@ -24,13 +52,6 @@ screen, `sudo`, `su` and polkit — and a password always remains available as a
   that start a face scan as soon as the greeter appears.
 - **Safe by construction.** Every failure mode — daemon down, not enrolled,
   rate-limited, refused — falls through to the password prompt.
-
-## Security notice
-
-**Face authentication is a convenience factor, not a password replacement.** Faciolock
-is designed to sit alongside your password, never to replace it.
-
-If you need a second factor that resists a motivated attacker, use a hardware token.
 
 ## How it works
 
@@ -84,7 +105,12 @@ socket and returns.
 - A Debian- or Ubuntu-based distribution with systemd and PAM.
 - KDE Plasma 6 for the optional settings page and greeter integration.
 
-To check for an IR camera, install `v4l-utils` and run:
+<details>
+<summary><b>Check whether you have an IR camera</b></summary>
+
+<br>
+
+Install `v4l-utils` and run:
 
 ```bash
 for d in /dev/video*; do echo "=== $d"; v4l2-ctl -d "$d" --info --list-formats 2>&1 | grep -E "Card type|\[[0-9]\]"; done
@@ -92,6 +118,8 @@ for d in /dev/video*; do echo "=== $d"; v4l2-ctl -d "$d" --info --list-formats 2
 
 Look for a device whose card type mentions **IR** and whose only pixel format is
 **`GREY`**.
+
+</details>
 
 ## Installation
 
@@ -151,33 +179,34 @@ cd ../faciolock-build && sudo apt install ./plasma-faciolock-kcm_*.deb ./plasma-
 
 ## Setup
 
-Detect the camera and write the daemon configuration:
+**1. Detect the camera** and write the daemon configuration:
 
 ```bash
 sudo faciolockctl diagnose --write
 ```
 
-Enrol your face (three poses):
+**2. Enrol your face** (three poses):
 
 ```bash
 sudo faciolockctl enroll
 ```
 
-Run one authentication exactly as PAM would, without touching any PAM configuration:
+**3. Test** one authentication exactly as PAM would, without touching any PAM configuration:
 
 ```bash
 sudo faciolockctl test
 ```
 
-To unlock the KDE lock screen by face, add your account to the `faciolock-auth` group,
-then log out and back in:
+**4. Enable the lock screen.** To unlock the KDE lock screen by face, add your account to
+the `faciolock-auth` group, then log out and back in:
 
 ```bash
 sudo gpasswd -a $USER faciolock-auth
 ```
 
-The PAM profile is enabled on install. Until a face is enrolled, authentication falls
-through to the password prompt.
+> [!NOTE]
+> The PAM profile is enabled on install. Until a face is enrolled, authentication falls
+> through to the password prompt.
 
 ## Usage
 
@@ -207,9 +236,10 @@ sudo faciolockctl remove $USER
 sudo apt purge plasma-faciolock-greeters plasma-faciolock-kcm libpam-faciolock faciolock faciolock-models
 ```
 
-If a PAM change ever locks you out of a service, a root shell (or the recovery entry in
-the boot menu) can run `faciolockctl disable`. Full recovery notes ship in
-`/usr/share/doc/libpam-faciolock/README.Debian`.
+> [!TIP]
+> **Locked out?** If a PAM change ever locks you out of a service, a root shell (or the
+> recovery entry in the boot menu) can run `faciolockctl disable`. Full recovery notes
+> ship in `/usr/share/doc/libpam-faciolock/README.Debian`.
 
 ## Development
 
@@ -226,6 +256,8 @@ cargo test --workspace
 Tests that need the ONNX models or recorded IR captures print a visible
 `SKIPPED — DEGRADED RUN` banner when those files are absent, rather than passing
 silently. Set `FACIOLOCK_CORPUS_REQUIRED=1` to make their absence a hard failure.
+
+### Regenerating the goldens
 
 Detection and alignment are pinned against OpenCV reference outputs. To regenerate the
 golden files, use a throwaway virtual environment — never the runtime:
