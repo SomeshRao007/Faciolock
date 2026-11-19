@@ -10,6 +10,25 @@ TestCase {
         LockScreen { width: 800; height: 600 }
     }
 
+    Component {
+        id: indicator
+        FaceScanIndicator {}
+    }
+
+    // The style comes from a root-owned file a newer release may write; an unknown one must
+    // still draw something rather than an empty chip.
+    function test_indicator_style_falls_back_to_landmarks() {
+        const chip = indicator.createObject(this, { style: "pulse", scanning: true })
+        verify(chip !== null)
+        compare(chip.look, "pulse")
+        verify(chip.width > chip.height)
+        chip.style = "sparkles"
+        compare(chip.look, "landmarks")
+        chip.style = ""
+        compare(chip.look, "landmarks")
+        chip.destroy()
+    }
+
     function test_disabled_does_not_start() {
         const screen = lockScreen.createObject(this, { faceEnabled: false })
         verify(screen !== null)

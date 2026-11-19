@@ -44,6 +44,40 @@ SimpleKCM {
                     checked = Qt.binding(function() { return kcm.pamEnabled })
                 }
             }
+
+            // Same pattern as the switch: show what the file says, not what was clicked, so
+            // a dismissed password prompt leaves the box on the value still in force.
+            Controls.ComboBox {
+                id: styleBox
+                readonly property var styles: ["landmarks", "viewfinder", "head", "pulse"]
+                Kirigami.FormData.label: "Scan indicator:"
+                model: ["Face landmarks", "Viewfinder", "Line-art head", "Infrared pulse"]
+                currentIndex: Math.max(0, styles.indexOf(kcm.indicator))
+                enabled: !kcm.busy
+                onActivated: index => {
+                    kcm.setIndicator(styles[index], positionBox.positions[positionBox.currentIndex])
+                    currentIndex = Qt.binding(() => Math.max(0, styles.indexOf(kcm.indicator)))
+                }
+            }
+
+            Controls.ComboBox {
+                id: positionBox
+                readonly property var positions: ["top", "bottom"]
+                Kirigami.FormData.label: "Indicator position:"
+                model: ["Top", "Bottom"]
+                currentIndex: Math.max(0, positions.indexOf(kcm.position))
+                enabled: !kcm.busy
+                onActivated: index => {
+                    kcm.setIndicator(styleBox.styles[styleBox.currentIndex], positions[index])
+                    currentIndex = Qt.binding(() => Math.max(0, positions.indexOf(kcm.position)))
+                }
+            }
+
+            Controls.Label {
+                text: "Shown on the login and lock screens, for everyone on this computer"
+                font: Kirigami.Theme.smallFont
+                color: Kirigami.Theme.disabledTextColor
+            }
         }
 
         // The pose prompt. faciolockctl is blocked on stdin until Capture is pressed, so
@@ -65,7 +99,7 @@ SimpleKCM {
 
             Controls.Button {
                 text: kcm.enrolment === "enrolled" ? "Enrol again" : "Enrol"
-                icon.name: "face-smile"
+                icon.name: "faciolock"
                 enabled: !kcm.busy && kcm.trouble === ""
                 onClicked: kcm.run("enroll")
             }

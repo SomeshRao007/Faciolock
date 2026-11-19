@@ -18,6 +18,11 @@ the greeter setting at /etc/xdg/faciolock-greeter.conf in sync with PAM. Direct
 changes through pam-auth-update require a matching enable/disable command to
 refresh the greeter setting.
 
+The scan indicator's style and position are set in the same Face Unlock page,
+or with `sudo faciolockctl indicator STYLE [top|bottom]`, where STYLE is
+landmarks (the default), viewfinder, head or pulse. Both are stored in the
+same file and survive enable, disable and package upgrades.
+
 SDDM reports when a login attempt begins and ends, rather than the exact moment
 the camera stops. Its scanning indicator ends on a login result or after seven
 seconds. The daemon limits camera capture separately to six seconds.

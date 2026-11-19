@@ -147,6 +147,7 @@ fi
 config=$(mktemp /etc/xdg/.faciolock-greeter.conf.XXXXXX)
 chmod 0644 "$config"
 printf '[FaceUnlock]\nenabled=%s\n' "$enabled" > "$config"
+grep -E '^(indicator|position)=' /etc/xdg/faciolock-greeter.conf >> "$config" 2>/dev/null || true
 mv -f "$config" /etc/xdg/faciolock-greeter.conf
 
 # Built here rather than by cargo, so it is skipped when the KF6 development packages are

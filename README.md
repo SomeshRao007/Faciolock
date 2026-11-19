@@ -218,6 +218,7 @@ sudo gpasswd -a $USER faciolock-auth
 | `faciolockctl test [USER]` | one authentication, exactly as PAM would request it |
 | `faciolockctl status [USER]` | whether a user is enrolled; needs no root and no camera |
 | `faciolockctl enable` / `disable` | turn face authentication on or off system-wide |
+| `faciolockctl indicator STYLE [top\|bottom]` | the login and lock screen scan indicator: `landmarks` (default), `viewfinder`, `head` or `pulse` |
 | `faciolockctl bench [-n N] [USER]` | N authentications, reporting p50/p95/p99 latency |
 | `faciolockctl diagnose [--write]` | detect the camera and generate the daemon configuration |
 
