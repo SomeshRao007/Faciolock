@@ -71,6 +71,29 @@ TestCase {
         screen.destroy()
     }
 
+    // After a match the next secret prompt is pam_kwallet5's; answer it once per lock only.
+    function test_match_answers_the_wallet_prompt_once() {
+        const screen = lockScreen.createObject(this, { faceEnabled: true })
+        verify(screen !== null)
+        screen.viewVisible = true
+        screen.authenticator.promptForSecret = "Password: "
+        compare(screen.authenticator.responses.length, 0)
+        screen.authenticator.state = 0
+        screen.authenticator.startAuthenticating()
+        screen.authenticator.infoMessage = "Face recognised"
+        compare(screen.faceMatched, true)
+        screen.authenticator.promptForSecret = "Password: "
+        compare(screen.authenticator.responses, [""])
+        compare(screen.scanning, false)
+        screen.authenticator.state = 0
+        compare(screen.faceMatched, false)
+        screen.authenticator.startAuthenticating()
+        screen.authenticator.infoMessage = "Face recognised"
+        screen.authenticator.promptForSecret = "Verification code: "
+        compare(screen.authenticator.responses.length, 1)
+        screen.destroy()
+    }
+
     function test_grace_lock_does_not_claim_scanning() {
         const screen = lockScreen.createObject(this, { faceEnabled: true })
         verify(screen !== null)

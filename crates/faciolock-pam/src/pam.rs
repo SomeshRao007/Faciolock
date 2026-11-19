@@ -6,7 +6,12 @@ pub const AUTHINFO_UNAVAIL: c_int = 9;
 pub const USER_UNKNOWN: c_int = 10;
 pub const IGNORE: c_int = 25;
 
-const ITEM_RHOST: c_int = 4;
+pub const SILENT: c_int = 0x8000;
+
+pub const ITEM_SERVICE: c_int = 1;
+pub const ITEM_RHOST: c_int = 4;
+
+const TEXT_INFO: c_int = 4;
 
 #[repr(C)]
 pub struct Handle {
@@ -16,6 +21,13 @@ pub struct Handle {
 unsafe extern "C" {
     fn pam_get_user(pamh: *mut Handle, user: *mut *const c_char, prompt: *const c_char) -> c_int;
     fn pam_get_item(pamh: *const Handle, item_type: c_int, item: *mut *const c_void) -> c_int;
+    fn pam_prompt(
+        pamh: *mut Handle,
+        style: c_int,
+        response: *mut *mut c_char,
+        fmt: *const c_char,
+        ...
+    ) -> c_int;
 }
 
 impl Handle {
@@ -28,13 +40,19 @@ impl Handle {
         unsafe { borrow(raw) }
     }
 
-    pub fn rhost(&self) -> Option<&str> {
+    pub fn item(&self, item_type: c_int) -> Option<&str> {
         let mut raw: *const c_void = core::ptr::null();
-        let rc = unsafe { pam_get_item(self, ITEM_RHOST, &mut raw) };
+        let rc = unsafe { pam_get_item(self, item_type, &mut raw) };
         if rc != SUCCESS {
             return None;
         }
         unsafe { borrow(raw as *const c_char) }
+    }
+
+    pub fn info(&mut self, text: &CStr) {
+        unsafe {
+            pam_prompt(self, TEXT_INFO, core::ptr::null_mut(), c"%s".as_ptr(), text.as_ptr());
+        }
     }
 }
 
