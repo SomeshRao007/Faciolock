@@ -19,14 +19,20 @@ const REQUEST_TIMEOUT_MS: u16 = 2_000;
 const CLEAR_DEADLINE: Duration = Duration::from_millis(300);
 const CLEAR_TIMEOUT_MS: u16 = 200;
 
+// kscreenlocker's `kde` stack runs pam_kwallet5 after us, and it prompts for the password a
+// face never supplies; the lock screen answers that prompt only after seeing this (wiki/07).
+const LOCK_SCREEN_SERVICE: &str = "kde";
+const MATCHED: &CStr = c"Face recognised";
+
 #[unsafe(no_mangle)]
 pub extern "C" fn pam_sm_authenticate(
     pamh: *mut pam::Handle,
-    _flags: c_int,
+    flags: c_int,
     argc: c_int,
     argv: *const *const c_char,
 ) -> c_int {
-    catch_unwind(AssertUnwindSafe(|| authenticate(pamh, argc, argv))).unwrap_or(pam::AUTH_ERR)
+    catch_unwind(AssertUnwindSafe(|| authenticate(pamh, flags, argc, argv)))
+        .unwrap_or(pam::AUTH_ERR)
 }
 
 #[unsafe(no_mangle)]
@@ -72,7 +78,12 @@ fn clear_lockout(pamh: *mut pam::Handle, argc: c_int, argv: *const *const c_char
     }
 }
 
-fn authenticate(pamh: *mut pam::Handle, argc: c_int, argv: *const *const c_char) -> c_int {
+fn authenticate(
+    pamh: *mut pam::Handle,
+    flags: c_int,
+    argc: c_int,
+    argv: *const *const c_char,
+) -> c_int {
     let opts = unsafe { options(argc, argv) };
     let Some(handle) = (unsafe { pamh.as_mut() }) else {
         return pam::AUTH_ERR;
@@ -93,7 +104,12 @@ fn authenticate(pamh: *mut pam::Handle, argc: c_int, argv: *const *const c_char)
     };
 
     match client::ask(opts.socket, &request, DEADLINE) {
-        Ok(verdict) => code_for(verdict),
+        Ok(verdict) => {
+            if announces(verdict, flags, handle.item(pam::ITEM_SERVICE)) {
+                handle.info(MATCHED);
+            }
+            code_for(verdict)
+        }
         Err(e) => {
             if opts.debug {
                 pam::debug(&format!("faciolock: {e}"));
@@ -113,8 +129,12 @@ fn code_for(verdict: Verdict) -> c_int {
     }
 }
 
+fn announces(verdict: Verdict, flags: c_int, service: Option<&str>) -> bool {
+    verdict.is_allow() && flags & pam::SILENT == 0 && service == Some(LOCK_SCREEN_SERVICE)
+}
+
 fn remote_session(handle: &pam::Handle) -> Option<&'static str> {
-    if handle.rhost().is_some_and(|h| !h.is_empty()) {
+    if handle.item(pam::ITEM_RHOST).is_some_and(|h| !h.is_empty()) {
         return Some("PAM_RHOST");
     }
     remote_from_environment()
@@ -207,6 +227,18 @@ mod tests {
             client::ask(&missing, &request, CLEAR_DEADLINE).is_err(),
             "an absent daemon is an error, not a hang"
         );
+    }
+
+    #[test]
+    fn only_a_match_on_the_lock_screen_says_anything() {
+        assert!(announces(Verdict::Allow, 0, Some("kde")));
+        assert!(!announces(Verdict::Allow, pam::SILENT, Some("kde")), "PAM_SILENT");
+        for service in [Some("sudo"), Some("sddm"), Some("kde-fingerprint"), None] {
+            assert!(!announces(Verdict::Allow, 0, service), "{service:?}");
+        }
+        for verdict in [Verdict::Deny, Verdict::Unavailable, Verdict::NoEnrolment] {
+            assert!(!announces(verdict, 0, Some("kde")), "{verdict:?}");
+        }
     }
 
     #[test]

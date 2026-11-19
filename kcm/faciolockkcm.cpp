@@ -3,6 +3,7 @@
 
 #include <QFile>
 #include <QProcess>
+#include <QSettings>
 
 #include <pwd.h>
 #include <unistd.h>
@@ -18,6 +19,8 @@ namespace
 // $PATH, which is not a thing a privileged prompt should depend on.
 const QString Ctl = QStringLiteral("/usr/bin/faciolockctl");
 const QString CommonAuth = QStringLiteral("/etc/pam.d/common-auth");
+// World-readable, root-written: reading it needs no prompt, changing it goes through pkexec.
+const QString GreeterConfig = QStringLiteral("/etc/xdg/faciolock-greeter.conf");
 const QString PoseMarker = QStringLiteral("[pose ");
 }
 
@@ -33,6 +36,8 @@ class FaciolockKcm : public KQuickConfigModule
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
     Q_PROPERTY(QString pose READ pose NOTIFY changed)
     Q_PROPERTY(QString log READ log NOTIFY changed)
+    Q_PROPERTY(QString indicator READ indicator NOTIFY changed)
+    Q_PROPERTY(QString position READ position NOTIFY changed)
 
 public:
     FaciolockKcm(QObject *parent, const KPluginMetaData &data)
@@ -84,6 +89,14 @@ public:
     {
         return m_log;
     }
+    QString indicator() const
+    {
+        return m_indicator;
+    }
+    QString position() const
+    {
+        return m_position;
+    }
 
     // No pkexec, and asynchronous. serve::may_ask lets a faciolock-auth member ask Status
     // about itself, so opening the panel costs no password prompt -- but the first connect
@@ -92,6 +105,9 @@ public:
     Q_INVOKABLE void refresh()
     {
         m_pamEnabled = pamProfileEnabled();
+        const QSettings greeter(GreeterConfig, QSettings::IniFormat);
+        m_indicator = greeter.value(QStringLiteral("FaceUnlock/indicator"), QStringLiteral("landmarks")).toString();
+        m_position = greeter.value(QStringLiteral("FaceUnlock/position"), QStringLiteral("top")).toString();
         if (m_status.state() == QProcess::NotRunning) {
             m_status.start(Ctl, {QStringLiteral("status")});
         }
@@ -107,8 +123,6 @@ public:
         if (busy() || user.isEmpty()) {
             return;
         }
-        m_log.clear();
-        m_pose.clear();
         QStringList args{Ctl, verb};
         if (verb != QLatin1String("enable") && verb != QLatin1String("disable")) {
             args << user;
@@ -116,8 +130,16 @@ public:
         if (verb == QLatin1String("remove")) {
             args << QStringLiteral("--yes");
         }
-        m_task.start(QStringLiteral("pkexec"), args);
-        Q_EMIT changed();
+        launch(args);
+    }
+
+    // faciolockctl validates both values; the panel only offers the ones it knows.
+    Q_INVOKABLE void setIndicator(const QString &style, const QString &position)
+    {
+        if (busy()) {
+            return;
+        }
+        launch({Ctl, QStringLiteral("indicator"), style, position});
     }
 
     // faciolockctl's prompt() blocks on stdin between poses and its prompt carries no
@@ -148,6 +170,14 @@ Q_SIGNALS:
     void changed();
 
 private:
+    void launch(const QStringList &args)
+    {
+        m_log.clear();
+        m_pose.clear();
+        m_task.start(QStringLiteral("pkexec"), args);
+        Q_EMIT changed();
+    }
+
     void readTask()
     {
         m_task.setReadChannel(QProcess::StandardOutput);
@@ -169,6 +199,7 @@ private:
             const QString verb = m_task.arguments().value(1);
             append(verb == QLatin1String("enable") || verb == QLatin1String("disable")
                 ? QStringLiteral("Could not change face unlock")
+                : verb == QLatin1String("indicator") ? QStringLiteral("Could not change the scan indicator")
                 : errors);
         }
         Q_EMIT changed();
@@ -217,6 +248,8 @@ private:
     QString m_trouble;
     QString m_pose;
     QString m_log;
+    QString m_indicator;
+    QString m_position;
     bool m_pamEnabled = false;
 };
 

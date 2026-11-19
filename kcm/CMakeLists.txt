@@ -29,3 +29,4 @@ target_link_libraries(kcm_faciolock
 # The generated entry is NoDisplay=true, which is right for System Settings and wrong for an
 # app launcher. This is the visible one.
 install(FILES org.faciolock.panel.desktop DESTINATION ${KDE_INSTALL_APPDIR})
+install(FILES faciolock.svg DESTINATION ${KDE_INSTALL_ICONDIR}/hicolor/scalable/apps)

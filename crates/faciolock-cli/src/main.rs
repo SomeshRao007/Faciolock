@@ -14,6 +14,10 @@ use client::{Answer, DEADLINE};
 
 const DEFAULT_CONFIG: &str = "/etc/faciolock/faciolockd.toml";
 const GREETER_CONFIG: &str = "/etc/xdg/faciolock-greeter.conf";
+const GREETER_KEYS: [&str; 3] = ["enabled", "indicator", "position"];
+// FaceScanIndicator.qml draws these; anything else falls back to the first.
+const INDICATOR_STYLES: [&str; 4] = ["landmarks", "viewfinder", "head", "pulse"];
+const INDICATOR_POSITIONS: [&str; 2] = ["top", "bottom"];
 
 const USAGE: &str = "\
 faciolockctl — manage Faciolock enrolments
@@ -25,6 +29,9 @@ faciolockctl — manage Faciolock enrolments
   status [USER]        whether USER is enrolled; no root, no camera
   enable               turn face authentication on systemwide (root)
   disable              turn face authentication off systemwide (root)
+  indicator STYLE [top|bottom]
+                       the greeters' scan indicator: landmarks, viewfinder,
+                       head or pulse (root)
   bench [-n N] [USER]  N authentications; p50/p95/p99
   diagnose [--write]   what this machine has, and the config for it
 
@@ -97,6 +104,9 @@ fn run(args: &[String]) -> Result<(), String> {
     if matches!(command, "enable" | "disable") {
         return needs_root(command).and_then(|()| set_pam_enabled(command == "enable", rest));
     }
+    if command == "indicator" {
+        return needs_root(command).and_then(|()| set_indicator(rest));
+    }
     let settings = Settings::load(&config)?;
 
     match command {
@@ -133,13 +143,37 @@ fn set_pam_enabled(enabled: bool, rest: &[&str]) -> Result<(), String> {
     if profile_enabled(&common_auth) != enabled {
         return Err("pam-auth-update did not change common-auth; check for local PAM edits".into());
     }
-    sync_greeter(enabled)?;
+    write_greeter(&[("enabled", if enabled { "true" } else { "false" })])?;
     println!("face authentication {}", if enabled { "enabled" } else { "disabled" });
     Ok(())
 }
 
-fn sync_greeter(enabled: bool) -> Result<(), String> {
+fn set_indicator(rest: &[&str]) -> Result<(), String> {
+    let (style, position) = match rest {
+        [style] => (*style, None),
+        [style, position] => (*style, Some(*position)),
+        _ => return Err("usage: faciolockctl indicator STYLE [top|bottom]".into()),
+    };
+    if !INDICATOR_STYLES.contains(&style) {
+        return Err(format!("unknown indicator {style:?}; one of {}", INDICATOR_STYLES.join(", ")));
+    }
+    if position.is_some_and(|p| !INDICATOR_POSITIONS.contains(&p)) {
+        return Err("the indicator position is top or bottom".into());
+    }
+    let mut changes = vec![("indicator", style)];
+    changes.extend(position.map(|p| ("position", p)));
+    write_greeter(&changes)?;
+    println!("scan indicator: {style}{}", position.map_or(String::new(), |p| format!(", {p}")));
+    Ok(())
+}
+
+fn write_greeter(changes: &[(&str, &str)]) -> Result<(), String> {
     let target = Path::new(GREETER_CONFIG);
+    let current = match std::fs::read_to_string(target) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("could not read the greeter setting: {e}")),
+    };
     let parent = target.parent().ok_or("invalid greeter setting path")?;
     if !parent.is_dir() {
         std::fs::create_dir_all(parent)
@@ -148,7 +182,7 @@ fn sync_greeter(enabled: bool) -> Result<(), String> {
     }
     let staging = target.with_extension(format!("conf.{}", std::process::id()));
     let result = (|| -> std::io::Result<()> {
-        std::fs::write(&staging, greeter_config(enabled))?;
+        std::fs::write(&staging, greeter_config(&current, changes))?;
         std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o644))?;
         std::fs::rename(&staging, target)
     })();
@@ -158,8 +192,22 @@ fn sync_greeter(enabled: bool) -> Result<(), String> {
     result.map_err(|e| format!("could not update the greeter setting: {e}"))
 }
 
-fn greeter_config(enabled: bool) -> &'static str {
-    if enabled { "[FaceUnlock]\nenabled=true\n" } else { "[FaceUnlock]\nenabled=false\n" }
+// The whole file is rewritten, but keys this call does not set carry over from `current`:
+// `enable` must not reset the indicator, and `indicator` must not switch face unlock off.
+fn greeter_config(current: &str, changes: &[(&str, &str)]) -> String {
+    let mut text = String::from("[FaceUnlock]\n");
+    for key in GREETER_KEYS {
+        let value = changes.iter().find(|(k, _)| *k == key).map(|(_, v)| *v).or_else(|| {
+            current
+                .lines()
+                .find_map(|line| line.trim().strip_prefix(key)?.trim_start().strip_prefix('='))
+                .map(str::trim)
+        });
+        if let Some(value) = value {
+            text.push_str(&format!("{key}={value}\n"));
+        }
+    }
+    text
 }
 
 fn profile_enabled(common_auth: &str) -> bool {
@@ -192,8 +240,8 @@ fn me(rest: &[&str]) -> Result<String, String> {
 fn needs_root(command: &str) -> Result<(), String> {
     match unsafe { libc::geteuid() } {
         0 => Ok(()),
-        _ if matches!(command, "enable" | "disable") => Err(format!(
-            "`{command}` needs root to change system PAM settings.\n\
+        _ if matches!(command, "enable" | "disable" | "indicator") => Err(format!(
+            "`{command}` needs root to change system settings.\n\
              Try:  sudo faciolockctl {command}"
         )),
         // Not the socket any more -- that is open to faciolock-auth. What is left is the
@@ -611,12 +659,39 @@ mod tests {
         {
             return Err("the systemwide toggle must reject arguments before running pam-auth-update".into());
         }
-        if !greeter_config(true).contains("enabled=true")
-            || !greeter_config(false).contains("enabled=false")
+        if !greeter_config("", &[("enabled", "true")]).contains("enabled=true")
+            || !greeter_config("", &[("enabled", "false")]).contains("enabled=false")
         {
             return Err("the greeter gate must match the PAM toggle".into());
         }
         Ok(())
+    }
+
+    #[test]
+    fn greeter_writes_keep_the_keys_they_do_not_set() {
+        let styled = "[FaceUnlock]\nenabled=true\nindicator=pulse\nposition=bottom\n";
+        assert_eq!(
+            greeter_config(styled, &[("enabled", "false")]),
+            "[FaceUnlock]\nenabled=false\nindicator=pulse\nposition=bottom\n",
+            "a PAM toggle reset the indicator"
+        );
+        assert_eq!(
+            greeter_config("[FaceUnlock]\nenabled=true\n", &[("indicator", "head")]),
+            "[FaceUnlock]\nenabled=true\nindicator=head\n",
+            "an indicator change touched face unlock or invented a position"
+        );
+        assert_eq!(
+            greeter_config("[FaceUnlock]\nenabledness=x\n", &[("indicator", "head")]),
+            "[FaceUnlock]\nindicator=head\n",
+            "a key that only starts with a known name was carried over"
+        );
+    }
+
+    #[test]
+    fn the_indicator_takes_only_known_values() {
+        for bad in [&[][..], &["sparkles"], &["landmarks", "middle"], &["landmarks", "top", "x"]] {
+            assert!(set_indicator(bad).is_err(), "{bad:?} reached the config write");
+        }
     }
 
     #[test]

@@ -57,6 +57,8 @@ Item {
         location: "file:///etc/xdg/faciolock-greeter.conf"
         category: "FaceUnlock"
         property bool enabled: false
+        property string indicator: "landmarks"
+        property string position: "top"
     }
 
     Timer {
@@ -81,9 +83,13 @@ Item {
     }
 
     FaceScanIndicator {
+        readonly property bool atTop: faceSettings.position !== "bottom"
         scanning: root.faceScanning
+        style: faceSettings.indicator
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: parent.bottom
+        anchors.top: atTop ? parent.top : undefined
+        anchors.bottom: atTop ? undefined : parent.bottom
+        anchors.topMargin: Kirigami.Units.gridUnit
         anchors.bottomMargin: Kirigami.Units.gridUnit * 4
         z: 100
     }

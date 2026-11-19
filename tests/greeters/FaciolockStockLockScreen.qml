@@ -6,6 +6,8 @@ Item {
         property int starts: 0
         property int state: 0
         property string promptForSecret: ""
+        property string infoMessage: ""
+        property var responses: []
         property bool graceLocked: false
         signal failed(int kind)
         signal succeeded()
@@ -14,8 +16,12 @@ Item {
                 return
             }
             promptForSecret = ""
+            infoMessage = ""
             starts += 1
             state = 1
+        }
+        function respond(response) {
+            responses.push(response)
         }
     }
 }

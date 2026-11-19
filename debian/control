@@ -94,11 +94,14 @@ Depends: ${misc:Depends},
          sddm,
          sddm-theme-breeze,
          qml6-module-qtcore,
+         qml6-module-qtquick-shapes,
          qml6-module-org-kde-kirigami
 Description: Automatic face scanning in Plasma and SDDM greeters
  A Breeze based SDDM theme and a Plasma lock screen wrapper that start a face
- authentication attempt when the greeter appears. An animated face indicator
+ authentication attempt when the greeter appears. An animated scan indicator
  appears during the attempt, and the normal password controls remain available.
+ The indicator's style and position are chosen in the Face Unlock settings
+ page or with faciolockctl indicator.
 
 Package: faciolock-models
 Architecture: all

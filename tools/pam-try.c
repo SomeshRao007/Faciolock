@@ -33,7 +33,7 @@ extern int pam_acct_mgmt(pam_handle_t *, int);
 extern int pam_end(pam_handle_t *, int);
 extern const char *pam_strerror(pam_handle_t *, int);
 
-/* The module never converses. If something asks, that is itself a finding. */
+/* The module never prompts, and speaks at all only to the `kde` service (wiki/03 R8). If something asks, that is itself a finding. */
 static int refuse(int n, const void **msg, void **resp, void *data)
 {
 	(void)n; (void)msg; (void)resp; (void)data;

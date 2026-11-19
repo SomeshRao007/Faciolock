@@ -60,6 +60,13 @@ touches no file under
 .IR /etc/pam.d .
 It also clears a spent failure budget on the way out.
 .TP
+.BI indicator " STYLE " [ top | bottom ]
+Choose the scan indicator the SDDM and Plasma lock screen greeters show:
+.BR landmarks " (the default), " viewfinder ", " head " or " pulse ,
+at the top (the default) or bottom of the screen. Written to
+.IR /etc/xdg/faciolock-greeter.conf
+alongside the face unlock switch, which it leaves as it was.
+.TP
 .BI bench " " [ -n " N" "] [" USER ]
 Run N authentications and report p50, p95 and p99. The first sample is a
 warm-up and is not counted, because a cold daemon start would otherwise be the
