@@ -46,10 +46,11 @@ if [ "${1:-}" = "--remove" ]; then
 		rm -f "$lockscreen" /usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/FaceScanIndicator.qml
 		dpkg-divert --local --remove --rename "$lockscreen"
 	fi
-	if [ -f /etc/sddm.conf.d/zz-faciolock.conf ] &&
-	   [ "$(cat /etc/sddm.conf.d/zz-faciolock.conf)" = "$(printf '[Theme]\nCurrent=faciolock')" ]; then
-		rm -f /etc/sddm.conf.d/zz-faciolock.conf
-	fi
+	for theme in /etc/sddm.conf.d/zz-faciolock.conf /etc/sddm.conf.d/90-faciolock.conf; do
+		if [ -f "$theme" ] && [ "$(cat "$theme")" = "$(printf '[Theme]\nCurrent=faciolock')" ]; then
+			rm -f "$theme"
+		fi
+	done
 	rm -rf "$greeterdir"
 	systemctl disable --now faciolock.socket 2>/dev/null || true
 	systemctl stop faciolock.service 2>/dev/null || true
@@ -131,8 +132,13 @@ install -d -m 0755 "$greeterdir"
 install -m 0644 "$root/data/greeters/sddm/faciolock"/* "$greeterdir/"
 install -m 0644 "$root/data/greeters/FaceScanIndicator.qml" "$greeterdir/"
 install -d -m 0755 /etc/sddm.conf.d /etc/xdg
-if [ ! -e /etc/sddm.conf.d/zz-faciolock.conf ]; then
-	printf '[Theme]\nCurrent=faciolock\n' > /etc/sddm.conf.d/zz-faciolock.conf
+if [ -f /etc/sddm.conf.d/zz-faciolock.conf ] &&
+   [ "$(cat /etc/sddm.conf.d/zz-faciolock.conf)" = "$(printf '[Theme]\nCurrent=faciolock')" ]; then
+	rm -f /etc/sddm.conf.d/zz-faciolock.conf
+fi
+# sorts before kde_settings.conf, so the KCM wins
+if [ ! -e /etc/sddm.conf.d/90-faciolock.conf ]; then
+	printf '[Theme]\nCurrent=faciolock\n' > /etc/sddm.conf.d/90-faciolock.conf
 fi
 if [ "$owner" != LOCAL ]; then
 	dpkg-divert --local --add --rename --divert "$stocklock" "$lockscreen"

@@ -15,8 +15,13 @@ if [ "$1" = configure ]; then
     grep -E '^(indicator|position)=' /etc/xdg/faciolock-greeter.conf >> "$config" 2>/dev/null || true
     mv -f "$config" /etc/xdg/faciolock-greeter.conf
 
-    if [ ! -e /etc/sddm.conf.d/zz-faciolock.conf ]; then
-        printf '[Theme]\nCurrent=faciolock\n' > /etc/sddm.conf.d/zz-faciolock.conf
+    old=/etc/sddm.conf.d/zz-faciolock.conf
+    if [ -f "$old" ] && [ "$(cat "$old")" = "$(printf '[Theme]\nCurrent=faciolock')" ]; then
+        rm -f "$old"
+    fi
+    # sorts before kde_settings.conf, so the KCM wins
+    if [ ! -e /etc/sddm.conf.d/90-faciolock.conf ]; then
+        printf '[Theme]\nCurrent=faciolock\n' > /etc/sddm.conf.d/90-faciolock.conf
     fi
 fi
 
