@@ -2,7 +2,7 @@
 set -e
 
 if [ "$1" = remove ] || [ "$1" = purge ] || [ "$1" = abort-install ]; then
-    theme=/etc/sddm.conf.d/zz-faciolock.conf
+    theme=/etc/sddm.conf.d/90-faciolock.conf
     if [ -f "$theme" ] && [ "$(cat "$theme")" = "$(printf '[Theme]\nCurrent=faciolock')" ]; then
         rm -f "$theme"
     fi

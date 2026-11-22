@@ -7,6 +7,11 @@ FaciolockStockLockScreen.qml, so the standard lock-screen layout, password
 field, session controls and power controls remain in use. Removing the package
 restores the original entry and the previous SDDM theme selection.
 
+The theme is selected by /etc/sddm.conf.d/90-faciolock.conf, which SDDM reads
+before kde_settings.conf. A theme chosen in System Settings > Login Screen
+(SDDM) therefore takes precedence; choose "Faciolock Breeze" there to get the
+face-scanning login screen back.
+
 Automatic scanning requires an enrolled face and an enabled PAM profile. The
 Plasma lock-screen process also needs access to the faciolock-auth socket group;
 log out and back in after group membership changes. The password prompt remains

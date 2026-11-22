@@ -1,3 +1,16 @@
+faciolock (0.1.0~ppa4) resolute; urgency=medium
+
+  * A login theme chosen in System Settings > Login Screen (SDDM) was ignored:
+    /etc/sddm.conf.d/zz-faciolock.conf sorted after the panel's
+    kde_settings.conf and always set the Faciolock theme. It is now
+    90-faciolock.conf, which sorts first, so the panel's choice wins.
+    Upgrades remove the old file unless it was edited.
+  * The scan indicator's style and position can be chosen from the Face
+    Unlock page or with faciolockctl indicator.
+  * The lock screen unlocks on a face match instead of waiting for a password.
+
+ -- Somesh Rao <cokasomeshrao@outlook.com>  Sun, 22 Nov 2026 13:13:38 +0530
+
 faciolock (0.1.0~ppa3) resolute; urgency=medium
 
   * Daylight. The emitter check asked for a dark OFF frame, which ambient
